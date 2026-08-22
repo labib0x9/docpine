@@ -18,10 +18,6 @@ type Hijack struct {
 	types.HijackedResponse
 }
 
-func (h *Hijack) Close() error {
-	return h.Close()
-}
-
 func (d *docli) PullImage() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

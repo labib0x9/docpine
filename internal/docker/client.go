@@ -34,7 +34,3 @@ func NewClient() Container {
 	}
 	return &dc
 }
-
-func (d *docli) Close() error {
-	return d.Close()
-}

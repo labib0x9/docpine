@@ -13,10 +13,6 @@ type Session struct {
 	*docker.Hijack
 }
 
-func (s *Session) Close() error {
-	return s.Hijack.Close()
-}
-
 type Manager struct {
 	mu  sync.Mutex
 	mp  map[string]string
