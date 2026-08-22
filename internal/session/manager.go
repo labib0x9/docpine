@@ -65,6 +65,10 @@ func (m *Manager) Attach(ctx context.Context, id string) (*Session, error) {
 	return &Session{h}, nil
 }
 
+func (m *Manager) Stop(ctx context.Context, id string) error {
+	return m.con.Stop(ctx, id)
+}
+
 func (m *Manager) AllSessions() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

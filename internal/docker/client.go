@@ -12,6 +12,7 @@ type Container interface {
 	Attach(ctx context.Context, id string) (*Hijack, error)
 	Close() error
 	PullImage() error
+	Stop(ctx context.Context, id string) error
 }
 
 type docli struct {

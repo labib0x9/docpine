@@ -121,6 +121,8 @@ func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
 		errCh <- err
 	}
 
+	r.Context().Deadline()
+
 	go func() {
 		if deadline, ok := ctx.Deadline(); ok {
 			conn.SetReadDeadline(deadline)
@@ -145,4 +147,7 @@ func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	err = <-errCh
+	if err := h.mngr.Stop(r.Context(), containerId); err != nil {
+		//
+	}
 }

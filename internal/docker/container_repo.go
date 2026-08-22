@@ -86,9 +86,9 @@ func (d *docli) Start(ctx context.Context, id string) error {
 
 // }
 
-// func (d *docli) ContainerStop() error {
-
-// }
+func (d *docli) Stop(ctx context.Context, id string) error {
+	return d.ContainerStop(ctx, id, container.StopOptions{})
+}
 
 // func (d *docli) ContainerRemove() error {
 
