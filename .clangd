@@ -1,0 +1,9 @@
+CompileFlags:
+  Add:
+    - "-target"
+    - "bpf"
+    - "-O2"
+    - "-Wall"
+    - "-Wno-unused-value"
+    - "-Wno-pointer-sign"
+    - "-Wno-compare-distinct-pointer-types"
