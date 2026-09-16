@@ -23,12 +23,12 @@ func NewSecurityHandler(engine *security.Engine) *SecurityHandler {
 
 // RegisterRoutes registers security endpoints on the given ServeMux.
 func (h *SecurityHandler) RegisterRoutes(mux *http.ServeMux) {
-	mux.Handle("GET /containers/{id}/findings", Cors(Preflight(http.HandlerFunc(h.GetFindings))))
-	mux.Handle("GET /containers/{id}/timeline", Cors(Preflight(http.HandlerFunc(h.GetTimeline))))
-	mux.Handle("POST /containers/{id}/policy", Cors(Preflight(http.HandlerFunc(h.SetPolicy))))
-	mux.Handle("GET /containers/{id}/policy", Cors(Preflight(http.HandlerFunc(h.GetPolicy))))
-	mux.Handle("GET /security/stats", Cors(Preflight(http.HandlerFunc(h.GetStats))))
-	mux.Handle("POST /security/events/simulate", Cors(Preflight(http.HandlerFunc(h.SimulateEvent))))
+	mux.HandleFunc("GET /containers/{id}/findings", h.GetFindings)
+	mux.HandleFunc("GET /containers/{id}/timeline", h.GetTimeline)
+	mux.HandleFunc("POST /containers/{id}/policy", h.SetPolicy)
+	mux.HandleFunc("GET /containers/{id}/policy", h.GetPolicy)
+	mux.HandleFunc("GET /security/stats", h.GetStats)
+	mux.HandleFunc("POST /security/events/simulate", h.SimulateEvent)
 }
 
 // GetFindings returns all behavioral findings generated for a specific container.

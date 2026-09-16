@@ -17,7 +17,7 @@ func TestCorrelationEngine_ShellToExfil(t *testing.T) {
 	containerID := "test-container-exfil"
 	cgroupID := uint64(555)
 
-	err := engine.RegisterContainer(ctx, containerID, cgroupID, security.NamespaceIdentity{}, security.CAP_CHOWN, nil)
+	err := engine.RegisterContainer(ctx, containerID, cgroupID, "docker", security.NamespaceIdentity{}, security.CAP_CHOWN, nil)
 	if err != nil {
 		t.Fatalf("failed to register container: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestCorrelationEngine_HostExposureAmplifier(t *testing.T) {
 
 	// Container created with privileged mode
 	hostExp := map[string]any{"privileged": true}
-	_ = engine.RegisterContainer(ctx, containerID, cgroupID, security.NamespaceIdentity{}, security.CAP_CHOWN, hostExp)
+	_ = engine.RegisterContainer(ctx, containerID, cgroupID, "docker", security.NamespaceIdentity{}, security.CAP_CHOWN, hostExp)
 
 	pid := uint32(200)
 	_ = engine.RecordProcessLifecycle(ctx, security.ProcessState{
@@ -144,7 +144,7 @@ func TestCorrelationEngine_BenignWorkloadResistance(t *testing.T) {
 	containerID := "benign-build-container"
 	cgroupID := uint64(999)
 
-	_ = engine.RegisterContainer(ctx, containerID, cgroupID, security.NamespaceIdentity{}, security.CAP_CHOWN, nil)
+	_ = engine.RegisterContainer(ctx, containerID, cgroupID, "docker", security.NamespaceIdentity{}, security.CAP_CHOWN, nil)
 
 	pid := uint32(300)
 	_ = engine.RecordProcessLifecycle(ctx, security.ProcessState{

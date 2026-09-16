@@ -16,6 +16,7 @@ func TestMemoryRepo_CRUD(t *testing.T) {
 	containerRec := ContainerRecord{
 		ID:           "test-container-1",
 		CgroupID:     12345,
+		Backend:      "docker",
 		CreatedAt:    time.Now(),
 		BaselineCaps: security.CAP_CHOWN | security.CAP_SETUID,
 		BaselineNS: security.NamespaceIdentity{

@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/labib0x9/docpine/internal/domain/security"
 	"github.com/lib/pq"
 )
@@ -22,6 +23,7 @@ var (
 type ContainerRecord struct {
 	ID           string                     `json:"id"`
 	CgroupID     uint64                     `json:"cgroup_id"`
+	Backend      string                     `json:"backend"` // 'docker' | 'gvisor'
 	CreatedAt    time.Time                  `json:"created_at"`
 	BaselineNS   security.NamespaceIdentity `json:"baseline_ns"`
 	BaselineCaps uint64                     `json:"baseline_caps"`
@@ -47,39 +49,45 @@ type Repository interface {
 }
 
 // PostgresRepo implements Repository backed by PostgreSQL.
-type PostgresRepo struct {
-	db *sql.DB
+type repo struct {
+	db *sqlx.DB
 }
 
 // NewPostgresRepo constructs a PostgreSQL repository.
-func NewPostgresRepo(db *sql.DB) *PostgresRepo {
-	return &PostgresRepo{db: db}
+func NewPostgresRepo(db *sqlx.DB) Repository {
+	return &repo{db: db}
 }
 
-func (r *PostgresRepo) RegisterContainer(ctx context.Context, c ContainerRecord) error {
+func (r *repo) RegisterContainer(ctx context.Context, c ContainerRecord) error {
 	nsJSON, _ := json.Marshal(c.BaselineNS)
 	expJSON, _ := json.Marshal(c.HostExposure)
 
+	backend := c.Backend
+	if backend == "" {
+		backend = "docker"
+	}
+
 	query := `
-		INSERT INTO containers (id, cgroup_id, created_at, baseline_ns, baseline_caps, host_exposure)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO containers (id, cgroup_id, backend, created_at, baseline_ns, baseline_caps, host_exposure)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (id) DO UPDATE SET
 			cgroup_id = EXCLUDED.cgroup_id,
+			backend = EXCLUDED.backend,
 			baseline_ns = EXCLUDED.baseline_ns,
 			baseline_caps = EXCLUDED.baseline_caps,
 			host_exposure = EXCLUDED.host_exposure
 	`
-	_, err := r.db.ExecContext(ctx, query, c.ID, c.CgroupID, c.CreatedAt, nsJSON, c.BaselineCaps, expJSON)
+	_, err := r.db.ExecContext(ctx, query, c.ID, c.CgroupID, backend, c.CreatedAt, nsJSON, c.BaselineCaps, expJSON)
 	return err
 }
 
-func (r *PostgresRepo) GetContainer(ctx context.Context, id string) (*ContainerRecord, error) {
-	query := `SELECT id, cgroup_id, created_at, baseline_ns, baseline_caps, host_exposure, terminated_at FROM containers WHERE id = $1`
+func (r *repo) GetContainer(ctx context.Context, id string) (*ContainerRecord, error) {
+	query := `SELECT id, cgroup_id, backend, created_at, baseline_ns, baseline_caps, host_exposure, terminated_at FROM containers WHERE id = $1`
 	row := r.db.QueryRowContext(ctx, query, id)
 
 	var c ContainerRecord
 	var nsJSON, expJSON []byte
-	err := row.Scan(&c.ID, &c.CgroupID, &c.CreatedAt, &nsJSON, &c.BaselineCaps, &expJSON, &c.TerminatedAt)
+	err := row.Scan(&c.ID, &c.CgroupID, &c.Backend, &c.CreatedAt, &nsJSON, &c.BaselineCaps, &expJSON, &c.TerminatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -92,13 +100,13 @@ func (r *PostgresRepo) GetContainer(ctx context.Context, id string) (*ContainerR
 	return &c, nil
 }
 
-func (r *PostgresRepo) GetContainerByCgroup(ctx context.Context, cgroupID uint64) (*ContainerRecord, error) {
-	query := `SELECT id, cgroup_id, created_at, baseline_ns, baseline_caps, host_exposure, terminated_at FROM containers WHERE cgroup_id = $1`
+func (r *repo) GetContainerByCgroup(ctx context.Context, cgroupID uint64) (*ContainerRecord, error) {
+	query := `SELECT id, cgroup_id, backend, created_at, baseline_ns, baseline_caps, host_exposure, terminated_at FROM containers WHERE cgroup_id = $1`
 	row := r.db.QueryRowContext(ctx, query, cgroupID)
 
 	var c ContainerRecord
 	var nsJSON, expJSON []byte
-	err := row.Scan(&c.ID, &c.CgroupID, &c.CreatedAt, &nsJSON, &c.BaselineCaps, &expJSON, &c.TerminatedAt)
+	err := row.Scan(&c.ID, &c.CgroupID, &c.Backend, &c.CreatedAt, &nsJSON, &c.BaselineCaps, &expJSON, &c.TerminatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -111,7 +119,7 @@ func (r *PostgresRepo) GetContainerByCgroup(ctx context.Context, cgroupID uint64
 	return &c, nil
 }
 
-func (r *PostgresRepo) RecordProcess(ctx context.Context, p security.ProcessState) error {
+func (r *repo) RecordProcess(ctx context.Context, p security.ProcessState) error {
 	query := `
 		INSERT INTO processes (cgroup_id, pid, ppid, comm, started_at, exited_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
@@ -123,7 +131,7 @@ func (r *PostgresRepo) RecordProcess(ctx context.Context, p security.ProcessStat
 	return err
 }
 
-func (r *PostgresRepo) GetProcess(ctx context.Context, cgroupID uint64, pid uint32) (*security.ProcessState, error) {
+func (r *repo) GetProcess(ctx context.Context, cgroupID uint64, pid uint32) (*security.ProcessState, error) {
 	query := `SELECT cgroup_id, pid, ppid, comm, started_at, exited_at FROM processes WHERE cgroup_id = $1 AND pid = $2 ORDER BY started_at DESC LIMIT 1`
 	row := r.db.QueryRowContext(ctx, query, cgroupID, pid)
 
@@ -138,7 +146,7 @@ func (r *PostgresRepo) GetProcess(ctx context.Context, cgroupID uint64, pid uint
 	return &p, nil
 }
 
-func (r *PostgresRepo) RecordEvent(ctx context.Context, e *security.EventRecord) error {
+func (r *repo) RecordEvent(ctx context.Context, e *security.EventRecord) error {
 	query := `
 		INSERT INTO events (cgroup_id, pid, event_type, data, occurred_at)
 		VALUES ($1, $2, $3, $4, $5)
@@ -147,7 +155,7 @@ func (r *PostgresRepo) RecordEvent(ctx context.Context, e *security.EventRecord)
 	return r.db.QueryRowContext(ctx, query, e.CgroupID, e.PID, e.Type.String(), e.Data, e.Time).Scan(&e.ID)
 }
 
-func (r *PostgresRepo) GetTimeline(ctx context.Context, containerID string, limit int) ([]security.EventRecord, error) {
+func (r *repo) GetTimeline(ctx context.Context, containerID string, limit int) ([]security.EventRecord, error) {
 	c, err := r.GetContainer(ctx, containerID)
 	if err != nil {
 		return nil, err
@@ -177,7 +185,7 @@ func (r *PostgresRepo) GetTimeline(ctx context.Context, containerID string, limi
 	return events, nil
 }
 
-func (r *PostgresRepo) SaveFinding(ctx context.Context, f *security.Finding) error {
+func (r *repo) SaveFinding(ctx context.Context, f *security.Finding) error {
 	query := `
 		INSERT INTO findings (container_id, pid, severity, finding_type, summary, event_ids, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -186,7 +194,7 @@ func (r *PostgresRepo) SaveFinding(ctx context.Context, f *security.Finding) err
 	return r.db.QueryRowContext(ctx, query, f.ContainerID, f.PID, string(f.Severity), f.FindingType, f.Summary, pq.Array(f.EventIDs), f.CreatedAt).Scan(&f.ID)
 }
 
-func (r *PostgresRepo) GetFindings(ctx context.Context, containerID string) ([]security.Finding, error) {
+func (r *repo) GetFindings(ctx context.Context, containerID string) ([]security.Finding, error) {
 	query := `SELECT id, container_id, pid, severity, finding_type, summary, event_ids, created_at FROM findings WHERE container_id = $1 ORDER BY created_at DESC`
 	rows, err := r.db.QueryContext(ctx, query, containerID)
 	if err != nil {
@@ -209,7 +217,7 @@ func (r *PostgresRepo) GetFindings(ctx context.Context, containerID string) ([]s
 	return findings, nil
 }
 
-func (r *PostgresRepo) SetPolicy(ctx context.Context, p security.ContainerPolicy) error {
+func (r *repo) SetPolicy(ctx context.Context, p security.ContainerPolicy) error {
 	netJSON, _ := json.Marshal(p.NetworkRules)
 	fsJSON, _ := json.Marshal(p.FSRules)
 
@@ -226,7 +234,7 @@ func (r *PostgresRepo) SetPolicy(ctx context.Context, p security.ContainerPolicy
 	return err
 }
 
-func (r *PostgresRepo) GetPolicy(ctx context.Context, containerID string) (*security.ContainerPolicy, error) {
+func (r *repo) GetPolicy(ctx context.Context, containerID string) (*security.ContainerPolicy, error) {
 	query := `SELECT container_id, allowed_capabilities, network_rules, fs_rules, updated_at FROM policies WHERE container_id = $1`
 	row := r.db.QueryRowContext(ctx, query, containerID)
 
@@ -247,13 +255,13 @@ func (r *PostgresRepo) GetPolicy(ctx context.Context, containerID string) (*secu
 	return &p, nil
 }
 
-func (r *PostgresRepo) CleanupContainer(ctx context.Context, containerID string) error {
+func (r *repo) CleanupContainer(ctx context.Context, containerID string) error {
 	now := time.Now()
 	_, err := r.db.ExecContext(ctx, `UPDATE containers SET terminated_at = $1 WHERE id = $2`, now, containerID)
 	return err
 }
 
-func (r *PostgresRepo) Stats(ctx context.Context) (map[string]any, error) {
+func (r *repo) Stats(ctx context.Context) (map[string]any, error) {
 	var activeContainers, totalEvents, totalFindings int64
 	_ = r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM containers WHERE terminated_at IS NULL`).Scan(&activeContainers)
 	_ = r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&totalEvents)
@@ -269,9 +277,9 @@ func (r *PostgresRepo) Stats(ctx context.Context) (map[string]any, error) {
 // MemoryRepo is an in-memory, thread-safe implementation of Repository for testing and standalone dev.
 type MemoryRepo struct {
 	mu           sync.RWMutex
-	containers   map[string]ContainerRecord          // keyed by container_id
-	byCgroup     map[uint64]string                   // cgroup_id -> container_id
-	processes    map[string]*security.ProcessState   // "cgroup:pid" -> process
+	containers   map[string]ContainerRecord        // keyed by container_id
+	byCgroup     map[uint64]string                 // cgroup_id -> container_id
+	processes    map[string]*security.ProcessState // "cgroup:pid" -> process
 	events       []security.EventRecord
 	findings     map[string][]security.Finding       // container_id -> findings
 	policies     map[string]security.ContainerPolicy // container_id -> policy

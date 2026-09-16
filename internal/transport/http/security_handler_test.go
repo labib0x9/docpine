@@ -22,7 +22,7 @@ func TestSecurityHandler_Endpoints(t *testing.T) {
 	containerID := "test-container-http"
 	cgroupID := uint64(1234)
 
-	_ = engine.RegisterContainer(ctx, containerID, cgroupID, domainsec.NamespaceIdentity{}, domainsec.CAP_CHOWN, nil)
+	_ = engine.RegisterContainer(ctx, containerID, cgroupID, "docker", domainsec.NamespaceIdentity{}, domainsec.CAP_CHOWN, nil)
 
 	handler := NewSecurityHandler(engine)
 	mux := http.NewServeMux()

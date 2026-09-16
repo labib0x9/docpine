@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,45 +12,34 @@ import (
 	"time"
 
 	"github.com/labib0x9/docpine/internal/app/security"
+	"github.com/labib0x9/docpine/internal/config"
 	"github.com/labib0x9/docpine/internal/infra/ebpf"
 	"github.com/labib0x9/docpine/internal/infra/postgres"
 	transporthttp "github.com/labib0x9/docpine/internal/transport/http"
+	"github.com/labib0x9/docpine/pkg/logger"
 	_ "github.com/lib/pq"
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	slog.SetDefault(logger)
+	cfg := config.GetConfig()
+
+	logCloser, err := logger.Setup(cfg.Logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
+	}
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
 
 	slog.Info("Starting Docpine eBPF Runtime Security Sensor & Monitor")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// 1. Initialize Storage Backend (Postgres or In-Memory)
-	var repo postgres.Repository
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL != "" {
-		db, err := sql.Open("postgres", dbURL)
-		if err != nil {
-			slog.Error("Failed to open Postgres connection", "error", err)
-			os.Exit(1)
-		}
-		defer db.Close()
+	db := postgres.NewPostgresConn(cfg.PostgreSQL)
 
-		if err := db.Ping(); err != nil {
-			slog.Warn("Postgres not reachable, falling back to MemoryRepo", "error", err)
-			repo = postgres.NewMemoryRepo()
-		} else {
-			slog.Info("Connected to PostgreSQL database for runtime security events")
-			repo = postgres.NewPostgresRepo(db)
-		}
-	} else {
-		slog.Info("DATABASE_URL not set: using in-memory security repository")
-		repo = postgres.NewMemoryRepo()
-	}
+	slog.Info("Connected to PostgreSQL database for runtime security events")
+	repo := postgres.NewPostgresRepo(db)
 
 	// 2. Initialize Security Engine & eBPF Manager
 	engine := security.NewEngine(repo)
@@ -63,10 +51,7 @@ func main() {
 	defer bpfManager.Close()
 
 	// 3. Start Security REST API Server
-	sensorAddr := os.Getenv("DOCPINE_SENSOR_ADDR")
-	if sensorAddr == "" {
-		sensorAddr = ":8081"
-	}
+	sensorAddr := cfg.Sensor.Addr
 
 	mux := http.NewServeMux()
 	secHandler := transporthttp.NewSecurityHandler(engine)
@@ -74,7 +59,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:    sensorAddr,
-		Handler: mux,
+		Handler: transporthttp.RequestId(transporthttp.Logger(transporthttp.Cors(mux))),
 	}
 
 	go func() {

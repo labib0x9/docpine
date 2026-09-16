@@ -41,10 +41,15 @@ func NewEngine(repo postgres.Repository, bpfWriter ...BPFMapWriter) *Engine {
 
 // RegisterContainer registers a newly provisioned container with baseline namespace and capability states.
 // Must be called immediately after container creation before guest execution begins.
-func (e *Engine) RegisterContainer(ctx context.Context, containerID string, cgroupID uint64, baselineNS security.NamespaceIdentity, baselineCaps uint64, hostExposure map[string]any) error {
+func (e *Engine) RegisterContainer(ctx context.Context, containerID string, cgroupID uint64, backend string, baselineNS security.NamespaceIdentity, baselineCaps uint64, hostExposure map[string]any) error {
+	if backend == "" {
+		backend = "docker"
+	}
+
 	record := postgres.ContainerRecord{
 		ID:           containerID,
 		CgroupID:     cgroupID,
+		Backend:      backend,
 		CreatedAt:    time.Now(),
 		BaselineNS:   baselineNS,
 		BaselineCaps: baselineCaps,
@@ -58,6 +63,7 @@ func (e *Engine) RegisterContainer(ctx context.Context, containerID string, cgro
 	slog.Info("Registered container for eBPF runtime security monitoring",
 		"container_id", containerID,
 		"cgroup_id", cgroupID,
+		"backend", backend,
 		"baseline_caps", baselineCaps,
 	)
 	return nil
