@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/labib0x9/docpine/internal/abuse"
+	"github.com/labib0x9/docpine/internal/config"
 	"github.com/labib0x9/docpine/internal/runtime"
 	"github.com/labib0x9/docpine/internal/session"
 )
@@ -21,6 +22,10 @@ type mockTransportSandbox struct {
 
 func (m *mockTransportSandbox) ID() string {
 	return m.id
+}
+
+func (m *mockTransportSandbox) CgroupID() (uint64, error) {
+	return 3000, nil
 }
 
 func (m *mockTransportSandbox) AttachPTY(ctx context.Context) (io.ReadWriteCloser, error) {
@@ -49,54 +54,29 @@ func (m *mockTransportRuntime) Close() error {
 	return nil
 }
 
-func TestSessionHandler_CreateAndHealth(t *testing.T) {
+func TestSessionHandler_Create(t *testing.T) {
 	rt := &mockTransportRuntime{}
 	mngr := session.NewManager(rt, 1*time.Minute)
 	defer mngr.Close(context.Background())
 
-	guard := abuse.NewGuard(abuse.GuardConfig{
-		CookieSecret: []byte("test-transport-secret-32-byte-12"),
-		RateLimiter: abuse.RateLimiterConfig{
-			Burst:      5,
-			RefillRate: 1 * time.Second,
+	cfg := config.Config{
+		Abuse: &config.Abuse{
+			CookieSecret:    []byte("test-transport-secret-32-byte-12"),
+			RateBurst:       5,
+			RateRefillRate:  1 * time.Second,
+			TurnstileSecret: "", // Dev bypass
 		},
-		PoWDifficulty:      8,
-		TurnstileSecretKey: "",
-		MaxConcurrent:      10,
-		RequirePoW:         false,
-	})
+		Session: &config.Session{
+			MaxConcurrent: 10,
+		},
+	}
+	guard := abuse.NewGuard(cfg)
 
 	handler := NewSessionHandler(mngr, guard)
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 
-	// 1. Health check
-	reqHealth := httptest.NewRequest(http.MethodGet, "/healthz", nil)
-	wHealth := httptest.NewRecorder()
-	mux.ServeHTTP(wHealth, reqHealth)
-
-	if wHealth.Code != http.StatusOK {
-		t.Fatalf("expected HTTP 200 for healthz, got %d", wHealth.Code)
-	}
-
-	// 2. PoW challenge fetch
-	reqPoW := httptest.NewRequest(http.MethodGet, "/challenges/pow", nil)
-	wPoW := httptest.NewRecorder()
-	mux.ServeHTTP(wPoW, reqPoW)
-
-	if wPoW.Code != http.StatusOK {
-		t.Fatalf("expected HTTP 200 for /challenges/pow, got %d", wPoW.Code)
-	}
-
-	var chal abuse.PoWChallenge
-	if err := json.Unmarshal(wPoW.Body.Bytes(), &chal); err != nil {
-		t.Fatalf("failed to parse PoW challenge response: %v", err)
-	}
-	if chal.Challenge == "" {
-		t.Fatal("expected non-empty challenge")
-	}
-
-	// 3. Create session
+	// Create session
 	reqCreate := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{}`))
 	reqCreate.Header.Set("CF-Connecting-IP", "203.0.113.88")
 	wCreate := httptest.NewRecorder()

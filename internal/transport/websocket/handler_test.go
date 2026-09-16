@@ -67,6 +67,10 @@ func (m *mockWSSandbox) ID() string {
 	return m.id
 }
 
+func (m *mockWSSandbox) CgroupID() (uint64, error) {
+	return 4000, nil
+}
+
 func (m *mockWSSandbox) AttachPTY(ctx context.Context) (io.ReadWriteCloser, error) {
 	return m.stream, nil
 }

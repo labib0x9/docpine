@@ -2,48 +2,38 @@ package abuse
 
 import (
 	"context"
-	"math"
 	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
-// RateLimiterConfig configures token bucket parameters.
-type RateLimiterConfig struct {
-	Burst      int           // Maximum token capacity per bucket (e.g. 5)
-	RefillRate time.Duration // Interval per single token refill (e.g. 30s)
-}
-
-type bucket struct {
-	tokens     float64
-	lastRefill time.Time
+type entry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
 }
 
 // RateLimiter implements a token bucket rate limiter keyed on client IP and device cookie pairs.
 type RateLimiter struct {
-	cfg      RateLimiterConfig
-	mu       sync.Mutex
-	pairs    map[string]*bucket // keyed on "ip:cookie"
-	ipOnly   map[string]*bucket // keyed on "ip"
-	stopChan chan struct{}
+	burst      int
+	refillRate time.Duration
+	mu         sync.Mutex
+	pairs      map[string]*entry // keyed on "ip:cookie"
+	ipOnly     map[string]*entry // keyed on "ip"
+	stopChan   chan struct{}
 }
 
-// NewRateLimiter creates a token bucket rate limiter with automated stale bucket eviction.
-func NewRateLimiter(cfg RateLimiterConfig) *RateLimiter {
-	if cfg.Burst <= 0 {
-		cfg.Burst = 5
-	}
-	if cfg.RefillRate <= 0 {
-		cfg.RefillRate = 30 * time.Second
-	}
-
+// NewRateLimiter creates a token bucket rate limiter using golang.org/x/time/rate.
+func NewRateLimiter(burst int, refillRate time.Duration) *RateLimiter {
 	rl := &RateLimiter{
-		cfg:      cfg,
-		pairs:    make(map[string]*bucket),
-		ipOnly:   make(map[string]*bucket),
-		stopChan: make(chan struct{}),
+		burst:      burst,
+		refillRate: refillRate,
+		pairs:      make(map[string]*entry),
+		ipOnly:     make(map[string]*entry),
+		stopChan:   make(chan struct{}),
 	}
 
-	go rl.evictStaleBuckets()
+	go rl.evictStaleEntries()
 	return rl
 }
 
@@ -54,58 +44,49 @@ func (rl *RateLimiter) Allow(ip, cookieID string) (bool, time.Duration) {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
-	refillPerSec := 1.0 / rl.cfg.RefillRate.Seconds()
 
-	// 1. Check combined pair bucket
+	// 1. Get or create pair limiter
 	pairKey := ip + ":" + cookieID
-	pairB, exists := rl.pairs[pairKey]
+	pairE, exists := rl.pairs[pairKey]
 	if !exists {
-		pairB = &bucket{
-			tokens:     float64(rl.cfg.Burst),
-			lastRefill: now,
+		pairE = &entry{
+			limiter:  rate.NewLimiter(rate.Every(rl.refillRate), rl.burst),
+			lastSeen: now,
 		}
-		rl.pairs[pairKey] = pairB
+		rl.pairs[pairKey] = pairE
 	} else {
-		elapsed := now.Sub(pairB.lastRefill).Seconds()
-		pairB.tokens = math.Min(float64(rl.cfg.Burst), pairB.tokens+elapsed*refillPerSec)
-		pairB.lastRefill = now
+		pairE.lastSeen = now
 	}
 
-	// 2. Check IP-only bucket (secondary line of defense against cookie deletion)
-	ipB, exists := rl.ipOnly[ip]
+	// 2. Get or create IP-only limiter (2x burst for network tolerance)
+	ipE, exists := rl.ipOnly[ip]
 	if !exists {
-		// Allow IP bucket 2x burst of single pair
-		ipB = &bucket{
-			tokens:     float64(rl.cfg.Burst * 2),
-			lastRefill: now,
+		ipE = &entry{
+			limiter:  rate.NewLimiter(rate.Every(rl.refillRate/2), rl.burst*2),
+			lastSeen: now,
 		}
-		rl.ipOnly[ip] = ipB
+		rl.ipOnly[ip] = ipE
 	} else {
-		elapsed := now.Sub(ipB.lastRefill).Seconds()
-		ipB.tokens = math.Min(float64(rl.cfg.Burst*2), ipB.tokens+elapsed*(refillPerSec*2))
-		ipB.lastRefill = now
+		ipE.lastSeen = now
 	}
 
-	if pairB.tokens < 1.0 {
-		needed := 1.0 - pairB.tokens
-		retrySec := time.Duration(needed/refillPerSec) * time.Second
-		if retrySec < time.Second {
-			retrySec = time.Second
-		}
-		return false, retrySec
+	// 3. Check pair reservation
+	rPair := pairE.limiter.Reserve()
+	if !rPair.OK() || rPair.Delay() > 0 {
+		delay := rPair.Delay()
+		rPair.Cancel()
+		return false, delay
 	}
 
-	if ipB.tokens < 1.0 {
-		needed := 1.0 - ipB.tokens
-		retrySec := time.Duration(needed/(refillPerSec*2)) * time.Second
-		if retrySec < time.Second {
-			retrySec = time.Second
-		}
-		return false, retrySec
+	// 4. Check IP reservation
+	rIP := ipE.limiter.Reserve()
+	if !rIP.OK() || rIP.Delay() > 0 {
+		delay := rIP.Delay()
+		rPair.Cancel() // Rollback pair reservation if IP limit is exceeded
+		rIP.Cancel()
+		return false, delay
 	}
 
-	pairB.tokens -= 1.0
-	ipB.tokens -= 1.0
 	return true, 0
 }
 
@@ -114,7 +95,7 @@ func (rl *RateLimiter) Close(ctx context.Context) {
 	close(rl.stopChan)
 }
 
-func (rl *RateLimiter) evictStaleBuckets() {
+func (rl *RateLimiter) evictStaleEntries() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
@@ -125,13 +106,13 @@ func (rl *RateLimiter) evictStaleBuckets() {
 		case <-ticker.C:
 			rl.mu.Lock()
 			now := time.Now()
-			for k, b := range rl.pairs {
-				if now.Sub(b.lastRefill) > 1*time.Hour {
+			for k, e := range rl.pairs {
+				if now.Sub(e.lastSeen) > 1*time.Hour {
 					delete(rl.pairs, k)
 				}
 			}
-			for k, b := range rl.ipOnly {
-				if now.Sub(b.lastRefill) > 1*time.Hour {
+			for k, e := range rl.ipOnly {
+				if now.Sub(e.lastSeen) > 1*time.Hour {
 					delete(rl.ipOnly, k)
 				}
 			}

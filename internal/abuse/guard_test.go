@@ -6,30 +6,33 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/labib0x9/docpine/internal/config"
 )
 
 func TestGuard_EndToEnd(t *testing.T) {
 	secret := []byte("guard-test-secret-32-byte-key-12")
-	guard := NewGuard(GuardConfig{
-		CookieSecret: secret,
-		RateLimiter: RateLimiterConfig{
-			Burst:      2,
-			RefillRate: 1 * time.Second,
+	cfg := config.Config{
+		Abuse: &config.Abuse{
+			CookieSecret:    secret,
+			RateBurst:       2,
+			RateRefillRate:  1 * time.Second,
+			TurnstileSecret: "1x0000000000000000000000000000000AA", // Passing test secret
 		},
-		PoWDifficulty:      8, // fast for testing
-		TurnstileSecretKey: "",
-		MaxConcurrent:      2,
-		RequirePoW:         true,
-	})
+		Session: &config.Session{
+			MaxConcurrent: 2,
+		},
+	}
+	guard := NewGuard(cfg)
 
-	// 1. Initial request without PoW -> Returns 428 Precondition Required with PoW challenge
+	// 1. Initial request without Turnstile token -> Returns 428 Precondition Required
 	req1 := httptest.NewRequest(http.MethodPost, "/sessions", nil)
 	req1.Header.Set("CF-Connecting-IP", "203.0.113.10")
 	w1 := httptest.NewRecorder()
 
 	passed, release := guard.CheckAnonymousCreate(w1, req1, nil)
 	if passed {
-		t.Fatal("expected request without PoW solution to be challenged")
+		t.Fatal("expected request without turnstile token to be challenged")
 	}
 	if release != nil {
 		t.Fatal("expected no slot reserved when challenged")
@@ -42,49 +45,29 @@ func TestGuard_EndToEnd(t *testing.T) {
 	if err := json.Unmarshal(w1.Body.Bytes(), &chalResp); err != nil {
 		t.Fatalf("failed to decode challenge response: %v", err)
 	}
-	if chalResp.PoWChallenge.Challenge == "" {
-		t.Fatal("expected non-empty PoW challenge")
+	if !chalResp.TurnstileRequired {
+		t.Fatal("expected TurnstileRequired to be true")
 	}
 
-	// 2. Solve the PoW challenge
-	nonce := Solve(chalResp.PoWChallenge.Challenge, chalResp.PoWChallenge.Salt, chalResp.PoWChallenge.Difficulty)
-	sol := &PoWSolution{
-		Challenge:  chalResp.PoWChallenge.Challenge,
-		Salt:       chalResp.PoWChallenge.Salt,
-		Difficulty: chalResp.PoWChallenge.Difficulty,
-		ExpiresAt:  chalResp.PoWChallenge.ExpiresAt,
-		Signature:  chalResp.PoWChallenge.Signature,
-		Nonce:      nonce,
-	}
-
+	// 2. Request with valid Turnstile Token -> Passes
 	req2 := httptest.NewRequest(http.MethodPost, "/sessions", nil)
 	req2.Header.Set("CF-Connecting-IP", "203.0.113.10")
-	// Carry forward the device cookie from w1
 	for _, c := range w1.Result().Cookies() {
 		req2.AddCookie(c)
 	}
 	w2 := httptest.NewRecorder()
 
-	passed2, release2 := guard.CheckAnonymousCreate(w2, req2, &CreateRequestPayload{PoWSolution: sol})
+	passed2, release2 := guard.CheckAnonymousCreate(w2, req2, &CreateRequestPayload{
+		TurnstileToken: "1x0000000000000000000000000000000AA",
+	})
 	if !passed2 {
-		t.Fatalf("expected request with valid PoW to pass, status %d body %s", w2.Code, w2.Body.String())
+		t.Fatalf("expected request with valid turnstile to pass, status %d body %s", w2.Code, w2.Body.String())
 	}
 	if guard.ConcurrencyLimiter().Active() != 1 {
 		t.Fatalf("expected 1 active slot, got %d", guard.ConcurrencyLimiter().Active())
 	}
 
 	// 3. Second valid request on same client
-	chal2 := guard.IssuePoWChallenge()
-	nonce2 := Solve(chal2.Challenge, chal2.Salt, chal2.Difficulty)
-	sol2 := &PoWSolution{
-		Challenge:  chal2.Challenge,
-		Salt:       chal2.Salt,
-		Difficulty: chal2.Difficulty,
-		ExpiresAt:  chal2.ExpiresAt,
-		Signature:  chal2.Signature,
-		Nonce:      nonce2,
-	}
-
 	req3 := httptest.NewRequest(http.MethodPost, "/sessions", nil)
 	req3.Header.Set("CF-Connecting-IP", "203.0.113.10")
 	for _, c := range w1.Result().Cookies() {
@@ -92,7 +75,9 @@ func TestGuard_EndToEnd(t *testing.T) {
 	}
 	w3 := httptest.NewRecorder()
 
-	passed3, release3 := guard.CheckAnonymousCreate(w3, req3, &CreateRequestPayload{PoWSolution: sol2})
+	passed3, release3 := guard.CheckAnonymousCreate(w3, req3, &CreateRequestPayload{
+		TurnstileToken: "1x0000000000000000000000000000000AA",
+	})
 	if !passed3 {
 		t.Fatalf("expected second request to pass, status %d body %s", w3.Code, w3.Body.String())
 	}
@@ -101,22 +86,13 @@ func TestGuard_EndToEnd(t *testing.T) {
 	}
 
 	// 4. Concurrency Cap Exceeded (Max is 2)
-	chal3 := guard.IssuePoWChallenge()
-	nonce3 := Solve(chal3.Challenge, chal3.Salt, chal3.Difficulty)
-	sol3 := &PoWSolution{
-		Challenge:  chal3.Challenge,
-		Salt:       chal3.Salt,
-		Difficulty: chal3.Difficulty,
-		ExpiresAt:  chal3.ExpiresAt,
-		Signature:  chal3.Signature,
-		Nonce:      nonce3,
-	}
-
 	req4 := httptest.NewRequest(http.MethodPost, "/sessions", nil)
 	req4.Header.Set("CF-Connecting-IP", "198.51.100.99") // different IP
 	w4 := httptest.NewRecorder()
 
-	passed4, _ := guard.CheckAnonymousCreate(w4, req4, &CreateRequestPayload{PoWSolution: sol3})
+	passed4, _ := guard.CheckAnonymousCreate(w4, req4, &CreateRequestPayload{
+		TurnstileToken: "1x0000000000000000000000000000000AA",
+	})
 	if passed4 {
 		t.Fatal("expected request to be rejected when global capacity is full")
 	}

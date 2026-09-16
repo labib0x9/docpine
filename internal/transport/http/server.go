@@ -7,7 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/labib0x9/docpine/internal/websocket"
+	"github.com/labib0x9/docpine/internal/config"
+	"github.com/labib0x9/docpine/internal/transport/websocket"
 )
 
 // Server wraps the standard HTTP server multiplexing REST and WebSocket handlers.
@@ -19,10 +20,9 @@ type Server struct {
 }
 
 // NewServer constructs a new HTTP server.
-func NewServer(addr string, handler *SessionHandler, wsHandler *websocket.Handler) *Server {
-	if addr == "" {
-		addr = ":8080"
-	}
+func NewServer(cnf *config.Config, handler *SessionHandler, wsHandler *websocket.Handler) *Server {
+	addr := fmt.Sprintf("%s:%d", cnf.Addr, cnf.Port)
+	initAllowedOrigins(cnf)
 	return &Server{
 		addr:      addr,
 		handler:   handler,
@@ -39,10 +39,10 @@ func (s *Server) Start() error {
 
 	s.server = &http.Server{
 		Addr:    s.addr,
-		Handler: mux,
+		Handler: RequestId(Logger(Cors(mux))),
 	}
 
-	fmt.Printf("Docpine listening on %s\n", s.addr)
+	fmt.Printf("Docpine listening on http://%s\n", s.addr)
 	err := s.server.ListenAndServe()
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("Server ListenAndServe failed", "error", err)

@@ -65,14 +65,6 @@ func (v *TurnstileValidator) Verify(ctx context.Context, token, clientIP string)
 		return ErrTurnstileMissing
 	}
 
-	// Support Cloudflare test dummy tokens
-	if token == "1x0000000000000000000000000000000AA" {
-		return nil
-	}
-	if token == "2x0000000000000000000000000000000AA" {
-		return fmt.Errorf("%w: test token always-fail", ErrTurnstileFailed)
-	}
-
 	form := url.Values{
 		"secret":   {v.secretKey},
 		"response": {token},

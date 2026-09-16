@@ -17,7 +17,7 @@ const (
 	// DeviceCookieName is the HTTP cookie name for the anonymous device identifier.
 	DeviceCookieName = "__dp_dev"
 	// DeviceCookieMaxAge specifies cookie validity (30 days).
-	DeviceCookieMaxAge = 30 * 24 * 60 * 60
+	DeviceCookieMaxAge = 10 * 60
 )
 
 // DeviceCookieManager generates, signs, and validates anonymous device cookies.
@@ -27,9 +27,6 @@ type DeviceCookieManager struct {
 
 // NewDeviceCookieManager constructs a new cookie manager with the given secret.
 func NewDeviceCookieManager(secret []byte) *DeviceCookieManager {
-	if len(secret) == 0 {
-		secret = []byte("docpine-default-cookie-secret-key-change-in-production")
-	}
 	return &DeviceCookieManager{secret: secret}
 }
 
@@ -54,7 +51,7 @@ func (m *DeviceCookieManager) Verify(cookieVal string) (string, bool) {
 		return "", false
 	}
 
-	// Verify cookie expiration (e.g. 30 days)
+	// Verify cookie expiration
 	cookieTime := time.Unix(ts, 0)
 	if time.Since(cookieTime) > time.Duration(DeviceCookieMaxAge)*time.Second || time.Until(cookieTime) > 5*time.Minute {
 		return "", false
@@ -89,7 +86,7 @@ func (m *DeviceCookieManager) GetOrSet(w http.ResponseWriter, r *http.Request) s
 		MaxAge:   DeviceCookieMaxAge,
 		HttpOnly: true,
 		Secure:   false, // Set to true by proxy/TLS in production
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteNoneMode,
 	})
 
 	return newID

@@ -378,6 +378,313 @@ go run ./cmd/docpine-sensor
 
 ---
 
+```bash
+
+# macOS
+brew install cloudflared
+# Linux (Ubuntu/Debian)
+curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+sudo dpkg -i cloudflared.deb
+
+mkdir -p ~/.cloudflared
+
+cloudflared tunnel login
+cloudflared tunnel create docpine-tunnel
+
+~/.cloudflared/config.yml
+tunnel: <YOUR-TUNNEL-UUID>
+credentials-file: /root/.cloudflared/<YOUR-TUNNEL-UUID>.json
+
+ingress:
+  # Route public domain to dockpine HTTP & WebSocket server
+  - hostname: sandboxes.yourdomain.com
+    service: http://127.0.0.1:8080
+    originRequest:
+      # Ensures WebSocket upgrades and HTTP/2 connections pass cleanly
+      noTLSVerify: true
+      keepAliveTimeout: 300s
+      connectTimeout: 30s
+  - service: http_status:404
+
+cloudflared tunnel route dns docpine-tunnel sandboxes.yourdomain.com
+cloudflared tunnel run docpine-tunnel
+
+Ensure WebSockets are enabled in the Cloudflare Dashboard under Network -> WebSockets: ON.
+
+
+```
+
+```
+ Cloudflare Turnstile Gate
+Cloudflare Turnstile is a privacy-first CAPTCHA alternative. The browser generates a token, which your backend verifies with Cloudflare's siteverify API.
+
+A. Cloudflare Dashboard Setup
+Go to Cloudflare Dashboard $\to$ Turnstile $\to$ Add Site.
+Set Domain (e.g. sandboxes.yourdomain.com or localhost for development).
+Mode: Managed or Non-Interactive (invisible).
+You will get two keys:
+Site Key (Public, for Frontend)
+Secret Key (Private, for Backend)
+B. Backend Configuration
+Set the secret key in your .env file:
+
+env
+TURNSTILE_SECRET=0x4AAAAAA...YOUR_SECRET_KEY
+How Dockpine validates it (
+
+internal/abuse/turnstile.go
+):
+
+go
+// Sends POST to https://challenges.cloudflare.com/turnstile/v0/siteverify
+form := url.Values{
+    "secret":   {v.secretKey},
+    "response": {token},
+    "remoteip": {clientIP}, // Uses CF-Connecting-IP
+}
+TIP
+
+Cloudflare Dummy Keys for Testing:
+
+Secret: 1x0000000000000000000000000000000AA (Always passes)
+Secret: 2x0000000000000000000000000000000AA (Always fails)
+C. Frontend Implementation (React / Next.js)
+Install the React Turnstile wrapper:
+
+bash
+npm install @marsidev/react-turnstile
+In your React component:
+
+tsx
+import { Turnstile } from '@marsidev/react-turnstile';
+import { useState } from 'react';
+export function SessionLauncher() {
+  const [turnstileToken, setTurnstileToken] = useState<string>('');
+  const handleLaunch = async () => {
+    const res = await fetch('https://sandboxes.yourdomain.com/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        turnstile_token: turnstileToken,
+      }),
+    });
+    const data = await res.json();
+    console.log('Session created:', data.session_id);
+  };
+  return (
+    <div>
+      <Turnstile
+        siteKey="0x4AAAAAA...YOUR_SITE_KEY"
+        onSuccess={(token) => setTurnstileToken(token)}
+      />
+      <button onClick={handleLaunch} disabled={!turnstileToken}>
+        Launch Sandbox
+      </button>
+    </div>
+  );
+}
+3. Proof-of-Work (PoW) Engine
+Proof-of-Work forces the client's CPU to compute a cryptographic puzzle (10–50ms) before creating a container. This makes automated DDoS / bot script attacks computationally expensive while remaining imperceptible to real users.
+
+How the Cryptographic Puzzle Works
+Server issues signed challenge:
+challenge: 16 random hex bytes
+salt: 8 random hex bytes
+difficulty: 16 (means the resulting SHA-256 hash must start with 16 zero bits = 2 leading 0x00 bytes)
+expires_at: Unix timestamp (+60s)
+signature: HMAC-SHA256(challenge + "|" + salt + "|" + difficulty + "|" + expires_at, secret)
+Client brute-forces a nonce:
+Finds an integer nonce where SHA256(challenge + salt + nonce.toString()) has $N$ leading zero bits.
+Server verifies in $O(1)$ time:
+Verifies HMAC signature (proves server generated it).
+Verifies timestamp (not expired).
+Checks replay cache (nonce hasn't been used before).
+Calculates one single SHA256(challenge + salt + nonce) and checks leading zero bits.
+A. Backend Configuration
+In .env:
+
+env
+REQUIRE_POW=true
+POW_DIFFICULTY=16
+COOKIE_SECRET=c2e8a109f5bc3a728d32b509ef1d48c0816e8b617a29e8471e4cb8f9d023a105
+B. Client-Side JavaScript / TypeScript Solver
+You can run this in a Web Worker or directly in TypeScript:
+
+ts
+// pow-solver.ts
+export interface PoWChallenge {
+  challenge: string;
+  salt: string;
+  difficulty: number;
+  expires_at: number;
+  signature: string;
+}
+export interface PoWSolution extends PoWChallenge {
+  nonce: string;
+}
+// Check leading zero bits
+function hasLeadingZeroBits(hashBytes: Uint8Array, bitsRequired: number): boolean {
+  const fullBytes = Math.floor(bitsRequired / 8);
+  const remainingBits = bitsRequired % 8;
+  for (let i = 0; i < fullBytes; i++) {
+    if (hashBytes[i] !== 0) return false;
+  }
+  if (remainingBits > 0) {
+    const mask = 0xff << (8 - remainingBits);
+    if ((hashBytes[fullBytes] & mask) !== 0) {
+      return false;
+    }
+  }
+  return true;
+}
+// Fast Web Crypto API solver
+export async function solvePoW(challenge: PoWChallenge): Promise<PoWSolution> {
+  const enc = new TextEncoder();
+  let nonce = 0;
+  while (true) {
+    const nonceStr = nonce.toString();
+    const data = enc.encode(challenge.challenge + challenge.salt + nonceStr);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashBytes = new Uint8Array(hashBuffer);
+    if (hasLeadingZeroBits(hashBytes, challenge.difficulty)) {
+      return {
+        ...challenge,
+        nonce: nonceStr,
+      };
+    }
+    nonce++;
+  }
+}
+C. End-to-End Frontend Flow
+ts
+export async function createSandboxSession(turnstileToken?: string) {
+  // 1. Get PoW challenge from server
+  const chalRes = await fetch('http://localhost:8080/challenges/pow');
+  const challenge: PoWChallenge = await chalRes.json();
+  // 2. Solve PoW in JS (takes ~15-30ms for difficulty 16)
+  const startTime = performance.now();
+  const solution = await solvePoW(challenge);
+  console.log(`Solved PoW in ${(performance.now() - startTime).toFixed(1)}ms with nonce:`, solution.nonce);
+  // 3. Submit Session Create Request with both PoW & Turnstile
+  const response = await fetch('http://localhost:8080/sessions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(turnstileToken ? { 'CF-Turnstile-Response': turnstileToken } : {}),
+    },
+    body: JSON.stringify({
+      pow_solution: solution,
+      turnstile_token: turnstileToken,
+    }),
+  });
+  if (response.status === 201) {
+    const data = await response.json();
+    return data.session_id; // Ready to attach WebSocket!
+  } else if (response.status === 428) {
+    // 428 Precondition Required (PoW required or missing)
+    const err = await response.json();
+    console.error('Challenge required:', err);
+  } else if (response.status === 429) {
+    // 429 Too Many Requests (Rate limited)
+    const retryAfter = response.headers.get('Retry-After');
+    console.warn(`Rate limited. Retry after ${retryAfter}s`);
+  } else if (response.status === 503) {
+    // 503 Service Unavailable (Global concurrency limit reached)
+    console.warn('All sandbox slots full, please try again in a few moments');
+  }
+}
+4. Summary Checklist for Full Setup
+Component	Where Configured	Key Settings
+Cloudflare Tunnel	~/.cloudflared/config.yml	service: http://127.0.0.1:8080, WebSockets enabled
+Real IP Extraction	Dockpine Engine	Automatically parses CF-Connecting-IP header
+Turnstile	.env (TURNSTILE_SECRET)	Set Cloudflare Turnstile Secret Key (or dummy key for dev)
+Proof-of-Work	.env (REQUIRE_POW=true, POW_DIFFICULTY=16)	Solved in client JS/Worker via SHA256(challenge+salt+nonce)
+Device Cookie	.env (COOKIE_SECRET)	Server issues signed __dp_dev HMAC cookie to prevent multi-session abuse
+```
+
 ## Relationship with Sockforces
 
 `dockpine` serves as the underlying sandbox and runtime security engine extracted and refined from [**sockforces**](https://github.com/labib0x9/sockforces), focusing on container orchestration, TTY multiplexing, and kernel-level sandbox security.
+
+
+
+
+
+
+-------
+-------
+-------
+-------
+-------
+
+
+# PROMPT: Build the Full Frontend for dockpine (ephemeral container sandbox & eBPF security platform)
+
+You are an expert full-stack engineer and UI/UX designer specializing in high-performance DevSecOps dashboards, WebSockets, xterm.js terminal emulation, and cyber-security telemetry interfaces.
+
+Build a modern, state-of-the-art, dark-themed Web Frontend for **dockpine** — an ephemeral container platform combining pluggable sandboxes (Docker, gVisor, Firecracker), layered abuse protection (Proof-of-Work, Cloudflare Turnstile, Token Bucket rate limiting)
+
+---
+
+## 🏗️ 1. Technical Stack & Architecture
+
+- **Framework**: Next.js 14+ (App Router) or Vite + React 18+ (TypeScript).
+- **Styling**: Tailwind CSS + Framer Motion for smooth transitions, Glassmorphism, and cybernetic micro-animations.
+- **Terminal**: `@xterm/xterm` + `@xterm/addon-fit` + `@xterm/addon-web-links` + `@xterm/addon-canvas`.
+- **Icons**: `lucide-react`.
+- **State & Real-time**: Zustand or TanStack Query + native WebSockets + Web Workers (for background PoW computation).
+- **Visualization**: VisX, Recharts, or Canvas for timeline graphs and process ancestry trees.
+
+---
+
+## 📡 2. Backend API & Protocol Specification
+
+The frontend connects to two dockpine backend services (or a unified reverse proxy):
+- **Control Plane** (Default `http://localhost:8080`): Session provisioning, abuse challenges, and interactive WebSocket PTY streaming., 
+
+### Endpoint Catalog:
+
+1. **PoW Challenge**: `GET /challenges/pow`
+   - Response (`200 OK`):
+     ```json
+     {
+       "challenge": "a8f3b209e14c45b7",
+       "salt": "7f09a12c",
+       "difficulty": 16,
+       "expires_at": 1726250400,
+       "signature": "d3b07384d113edec49eaa6238ad5ff00..."
+     }
+     ```
+2. **Create Session**: `POST /sessions`
+   - Request Body:
+     ```json
+     {
+       "pow_solution": {
+         "challenge": "a8f3b209e14c45b7",
+         "salt": "7f09a12c",
+         "difficulty": 16,
+         "expires_at": 1726250400,
+         "signature": "d3b07384d113edec49eaa6238ad5ff00...",
+         "nonce": "48201"
+       },
+       "turnstile_token": "optional-turnstile-token"
+     }
+     ```
+   - Responses:
+     - `201 Created`: `{"session_id": "uuid-here", "expires_in_sec": 300}`
+     - `428 Precondition Required`: `{"error": "challenge_required", "pow_challenge": {...}}`
+     - `429 Too Many Requests`: `{"error": "rate_limited", "retry_after": 30}`
+     - `503 Service Unavailable`: `{"error": "global_capacity_reached"}`
+
+3. **WebSocket Interactive Terminal**: `GET /sessions/{session_id}/attach`
+   - **Lane 1 (Terminal I/O)**: Raw bidirectional UTF-8 bytes to/from container PTY.
+   - **Lane 2 (Control Frames)**: Out-of-band JSON text messages:
+     - Terminal resize: `{"type": "resize", "cols": 120, "rows": 40}`
+     - Heartbeat ping: `{"type": "ping"}` -> Server replies `{"type": "pong"}`
+
+## 🧩 4. Core Features & Module Breakdown
+
+### Module 1: Proof-of-Work (PoW) Client Web Worker
+- Implement an off-main-thread Web Worker (`pow.worker.ts`) that solves SHA-256 puzzles without freezing the UI.
+- Algorithm: Iterate `nonce` (uint64) such that `SHA256(challenge + salt + nonce.toString())` has $N$ leading zero bits (`difficulty`).
+- Automatically fetch `/challenges/pow` in the background or solve on demand when intercepting `428 Precondition Required`.

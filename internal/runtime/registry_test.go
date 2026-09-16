@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/labib0x9/docpine/internal/config"
 )
 
 type mockSandbox struct {
@@ -14,6 +16,10 @@ type mockSandbox struct {
 
 func (m *mockSandbox) ID() string {
 	return m.id
+}
+
+func (m *mockSandbox) CgroupID() (uint64, error) {
+	return 1000, nil
 }
 
 func (m *mockSandbox) AttachPTY(ctx context.Context) (io.ReadWriteCloser, error) {
@@ -59,12 +65,12 @@ func TestRegistry(t *testing.T) {
 		sandboxes: make(map[string]*mockSandbox),
 	}
 
-	Register("mock-test", func(ctx context.Context, cfg Config) (Runtime, error) {
+	Register("mock-test", func(ctx context.Context, cfg config.Runtime) (Runtime, error) {
 		return mock, nil
 	})
 
 	// 1. Success case
-	rt, err := New(ctx, "mock-test", Config{})
+	rt, err := New(ctx, "mock-test", config.Runtime{})
 	if err != nil {
 		t.Fatalf("expected successful instantiation, got: %v", err)
 	}
@@ -73,7 +79,7 @@ func TestRegistry(t *testing.T) {
 	}
 
 	// 2. Unknown runtime
-	_, err = New(ctx, "non-existent-backend", Config{})
+	_, err = New(ctx, "non-existent-backend", config.Runtime{})
 	if !errors.Is(err, ErrRuntimeNotFound) {
 		t.Fatalf("expected ErrRuntimeNotFound, got: %v", err)
 	}
@@ -84,11 +90,11 @@ func TestRegistry(t *testing.T) {
 		prereqErr: ErrPrerequisiteFailed,
 		sandboxes: make(map[string]*mockSandbox),
 	}
-	Register("mock-fail-prereq", func(ctx context.Context, cfg Config) (Runtime, error) {
+	Register("mock-fail-prereq", func(ctx context.Context, cfg config.Runtime) (Runtime, error) {
 		return failPrereqMock, nil
 	})
 
-	_, err = New(ctx, "mock-fail-prereq", Config{})
+	_, err = New(ctx, "mock-fail-prereq", config.Runtime{})
 	if !errors.Is(err, ErrPrerequisiteFailed) {
 		t.Fatalf("expected ErrPrerequisiteFailed, got: %v", err)
 	}

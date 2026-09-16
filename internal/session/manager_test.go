@@ -20,6 +20,10 @@ func (m *mockSandbox) ID() string {
 	return m.id
 }
 
+func (m *mockSandbox) CgroupID() (uint64, error) {
+	return 2000, nil
+}
+
 func (m *mockSandbox) AttachPTY(ctx context.Context) (io.ReadWriteCloser, error) {
 	return nil, nil
 }

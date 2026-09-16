@@ -7,20 +7,17 @@ import (
 )
 
 func TestRateLimiter(t *testing.T) {
-	rl := NewRateLimiter(RateLimiterConfig{
-		Burst:      3,
-		RefillRate: 100 * time.Millisecond,
-	})
+	rl := NewRateLimiter(3, 100*time.Millisecond)
 	defer rl.Close(context.Background())
 
 	ip := "198.51.100.1"
 	cookie := "device-123"
 
-	// 1. Consume burst tokens
+	// 1. Consume burst tokens (3 tokens)
 	for i := 0; i < 3; i++ {
-		allowed, _ := rl.Allow(ip, cookie)
+		allowed, delay := rl.Allow(ip, cookie)
 		if !allowed {
-			t.Fatalf("expected request %d to be allowed under burst", i+1)
+			t.Fatalf("expected request %d to be allowed under burst, got delay: %v", i+1, delay)
 		}
 	}
 
@@ -40,7 +37,7 @@ func TestRateLimiter(t *testing.T) {
 	}
 
 	// 4. Wait for refill
-	time.Sleep(120 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 	allowedAfterRefill, _ := rl.Allow(ip, cookie)
 	if !allowedAfterRefill {
 		t.Fatal("expected request to be allowed after token refill")

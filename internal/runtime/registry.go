@@ -5,22 +5,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/labib0x9/docpine/internal/config"
 )
 
-// Config carries general runtime configuration parameters.
-type Config struct {
-	Image          string // Default container image or kernel/rootfs path
-	NetworkMode    string // Network isolation mode (e.g. "none", "bridge")
-	MemoryLimit    int64  // Memory limit in bytes
-	CPUShares      int64  // CPU shares
-	RunscPath      string // Path to runsc binary for gVisor
-	FirecrackerBin string // Path to firecracker binary
-	KernelPath     string // Path to guest kernel vmlinux for Firecracker
-	RootFSPath     string // Path to guest rootfs for Firecracker
-}
-
 // Factory is a constructor function for a specific runtime backend.
-type Factory func(ctx context.Context, cfg Config) (Runtime, error)
+type Factory func(ctx context.Context, cfg config.Runtime) (Runtime, error)
 
 var (
 	registryMu sync.RWMutex
@@ -47,7 +37,7 @@ func Available() []string {
 
 // New instantiates a runtime backend by name, initializes it, and verifies its host prerequisites.
 // It fails fast and loudly if the backend is unknown or prerequisites are missing.
-func New(ctx context.Context, name string, cfg Config) (Runtime, error) {
+func New(ctx context.Context, name string, cfg config.Runtime) (Runtime, error) {
 	normalized := strings.ToLower(strings.TrimSpace(name))
 	if normalized == "" {
 		normalized = "docker"

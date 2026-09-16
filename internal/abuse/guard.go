@@ -7,53 +7,38 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/labib0x9/docpine/internal/config"
 	"github.com/labib0x9/docpine/jsonio"
 )
-
-// GuardConfig aggregates configuration for all abuse prevention layers.
-type GuardConfig struct {
-	CookieSecret       []byte
-	RateLimiter        RateLimiterConfig
-	PoWDifficulty      int
-	TurnstileSecretKey string
-	MaxConcurrent      int
-	RequirePoW         bool // Always require PoW solution for create requests
-}
 
 // Guard coordinates the multi-layered abuse protection pipeline for anonymous sessions.
 type Guard struct {
 	cookieMgr   *DeviceCookieManager
 	rateLimiter *RateLimiter
-	powEngine   *PoWEngine
 	turnstile   *TurnstileValidator
 	concurrency *ConcurrencyLimiter
-	requirePoW  bool
 }
 
 // NewGuard constructs a fully configured Guard.
-func NewGuard(cfg GuardConfig) *Guard {
+func NewGuard(cfg config.Config) *Guard {
 	return &Guard{
-		cookieMgr:   NewDeviceCookieManager(cfg.CookieSecret),
-		rateLimiter: NewRateLimiter(cfg.RateLimiter),
-		powEngine:   NewPoWEngine(cfg.CookieSecret, cfg.PoWDifficulty),
-		turnstile:   NewTurnstileValidator(cfg.TurnstileSecretKey),
-		concurrency: NewConcurrencyLimiter(cfg.MaxConcurrent),
-		requirePoW:  cfg.RequirePoW,
+		cookieMgr:   NewDeviceCookieManager(cfg.Abuse.CookieSecret),
+		rateLimiter: NewRateLimiter(cfg.Abuse.RateBurst, cfg.Abuse.RateRefillRate),
+		turnstile:   NewTurnstileValidator(cfg.Abuse.TurnstileSecret),
+		concurrency: NewConcurrencyLimiter(cfg.Session.MaxConcurrent),
 	}
 }
 
 // CreateRequestPayload represents client-submitted abuse prevention tokens during session creation.
 type CreateRequestPayload struct {
-	PoWSolution    *PoWSolution `json:"pow_solution,omitempty"`
-	TurnstileToken string       `json:"turnstile_token,omitempty"`
+	TurnstileToken string `json:"turnstile_token,omitempty"`
 }
 
 // ChallengeResponsePayload is returned when a client must solve a challenge before creation.
 type ChallengeResponsePayload struct {
-	Error             string       `json:"error"`
-	Message           string       `json:"message"`
-	PoWChallenge      PoWChallenge `json:"pow_challenge"`
-	TurnstileRequired bool         `json:"turnstile_required"`
+	Error             string `json:"error"`
+	Message           string `json:"message"`
+	TurnstileRequired bool   `json:"turnstile_required"`
 }
 
 // CheckAnonymousCreate evaluates all abuse layers for an incoming anonymous create request.
@@ -88,29 +73,8 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 		}
 	}
 
-	// Layer 4 & 5: Proof-of-Work & Turnstile Challenge Verification
-	needsPoW := g.requirePoW
+	// Layer 4 & 5: Cloudflare Turnstile Challenge Verification
 	needsTurnstile := g.turnstile.IsEnabled()
-
-	// Check if PoW is required or submitted
-	if needsPoW {
-		if payload == nil || payload.PoWSolution == nil {
-			release()
-			g.sendChallengeResponse(w, "Proof-of-Work puzzle required before creating a sandbox.")
-			return false, nil
-		}
-
-		if err := g.powEngine.Verify(*payload.PoWSolution); err != nil {
-			release()
-			slog.Warn("Session create PoW verification failed",
-				"client_ip", clientIP,
-				"device_id", deviceID,
-				"error", err,
-			)
-			g.sendChallengeResponse(w, fmt.Sprintf("Proof-of-Work challenge verification failed: %v", err))
-			return false, nil
-		}
-	}
 
 	// Check Turnstile token if configured
 	if needsTurnstile {
@@ -120,6 +84,12 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 		}
 		if token == "" {
 			token = r.Header.Get("CF-Turnstile-Response")
+		}
+
+		if token == "" {
+			release()
+			g.sendChallengeResponse(w, "Cloudflare Turnstile verification required before creating a sandbox.")
+			return false, nil
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -169,27 +139,15 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 	return true, release
 }
 
-// IssuePoWChallenge generates and returns a fresh Proof-of-Work challenge.
-func (g *Guard) IssuePoWChallenge() PoWChallenge {
-	return g.powEngine.GenerateChallenge()
-}
-
-// PoWEngine returns the underlying PoW engine.
-func (g *Guard) PoWEngine() *PoWEngine {
-	return g.powEngine
-}
-
 // ConcurrencyLimiter returns the concurrency limiter.
 func (g *Guard) ConcurrencyLimiter() *ConcurrencyLimiter {
 	return g.concurrency
 }
 
 func (g *Guard) sendChallengeResponse(w http.ResponseWriter, message string) {
-	powChal := g.powEngine.GenerateChallenge()
 	resp := ChallengeResponsePayload{
 		Error:             "challenge_required",
 		Message:           message,
-		PoWChallenge:      powChal,
 		TurnstileRequired: g.turnstile.IsEnabled(),
 	}
 	jsonio.SendJson(w, resp, http.StatusPreconditionRequired)

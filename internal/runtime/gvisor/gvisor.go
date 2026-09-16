@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"github.com/labib0x9/docpine/internal/config"
 	"github.com/labib0x9/docpine/internal/runtime"
 )
 
@@ -50,10 +51,10 @@ while checking for both host `runsc` binary presence on $PATH and Docker runtime
 */
 
 func init() {
-	runtime.Register("gvisor", func(ctx context.Context, cfg runtime.Config) (runtime.Runtime, error) {
+	runtime.Register("gvisor", func(ctx context.Context, cfg config.Runtime) (runtime.Runtime, error) {
 		return New(ctx, cfg)
 	})
-	runtime.Register("runsc", func(ctx context.Context, cfg runtime.Config) (runtime.Runtime, error) {
+	runtime.Register("runsc", func(ctx context.Context, cfg config.Runtime) (runtime.Runtime, error) {
 		return New(ctx, cfg)
 	})
 }
@@ -61,13 +62,13 @@ func init() {
 // GvisorRuntime implements runtime.Runtime using gVisor's runsc runtime.
 type GvisorRuntime struct {
 	cli        *client.Client
-	cfg        runtime.Config
+	cfg        config.Runtime
 	runscBin   string
 	defaultImg string
 }
 
 // New creates a new gVisor runtime instance.
-func New(ctx context.Context, cfg runtime.Config) (*GvisorRuntime, error) {
+func New(ctx context.Context, cfg config.Runtime) (*GvisorRuntime, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create docker client for gvisor: %w", err)
@@ -241,6 +242,27 @@ type gvisorSandbox struct {
 
 func (s *gvisorSandbox) ID() string {
 	return s.id
+}
+
+// CgroupID returns the 64-bit cgroup ID or init PID for the gVisor sandbox container.
+func (s *gvisorSandbox) CgroupID() (uint64, error) {
+	s.destroyMu.Lock()
+	if s.destroyed {
+		s.destroyMu.Unlock()
+		return 0, runtime.ErrSandboxDestroyed
+	}
+	s.destroyMu.Unlock()
+
+	inspect, err := s.cli.ContainerInspect(context.Background(), s.id)
+	if err != nil {
+		return 0, fmt.Errorf("failed to inspect gvisor container for cgroup: %w", err)
+	}
+
+	if inspect.State == nil || inspect.State.Pid == 0 {
+		return 0, fmt.Errorf("gvisor sentry process is not running")
+	}
+
+	return uint64(inspect.State.Pid), nil
 }
 
 func (s *gvisorSandbox) AttachPTY(ctx context.Context) (io.ReadWriteCloser, error) {

@@ -13,11 +13,12 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"github.com/labib0x9/docpine/internal/config"
 	"github.com/labib0x9/docpine/internal/runtime"
 )
 
 func init() {
-	runtime.Register("docker", func(ctx context.Context, cfg runtime.Config) (runtime.Runtime, error) {
+	runtime.Register("docker", func(ctx context.Context, cfg config.Runtime) (runtime.Runtime, error) {
 		return New(ctx, cfg)
 	})
 }
@@ -25,12 +26,12 @@ func init() {
 // DockerRuntime implements runtime.Runtime using the standard Docker Engine API.
 type DockerRuntime struct {
 	cli        *client.Client
-	cfg        runtime.Config
+	cfg        config.Runtime
 	defaultImg string
 }
 
 // New creates a new Docker runtime instance.
-func New(ctx context.Context, cfg runtime.Config) (*DockerRuntime, error) {
+func New(ctx context.Context, cfg config.Runtime) (*DockerRuntime, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create docker client: %w", err)
@@ -171,6 +172,27 @@ type dockerSandbox struct {
 // ID returns the Docker container ID.
 func (s *dockerSandbox) ID() string {
 	return s.id
+}
+
+// CgroupID returns the 64-bit cgroup ID or init PID for container identity.
+func (s *dockerSandbox) CgroupID() (uint64, error) {
+	s.destroyMu.Lock()
+	if s.destroyed {
+		s.destroyMu.Unlock()
+		return 0, runtime.ErrSandboxDestroyed
+	}
+	s.destroyMu.Unlock()
+
+	inspect, err := s.cli.ContainerInspect(context.Background(), s.id)
+	if err != nil {
+		return 0, fmt.Errorf("failed to inspect container for cgroup: %w", err)
+	}
+
+	if inspect.State == nil || inspect.State.Pid == 0 {
+		return 0, fmt.Errorf("container init process is not running")
+	}
+
+	return uint64(inspect.State.Pid), nil
 }
 
 // AttachPTY opens a hijacked bidirectional stream to the container's TTY.

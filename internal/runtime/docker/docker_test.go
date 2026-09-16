@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/labib0x9/docpine/internal/config"
 	"github.com/labib0x9/docpine/internal/runtime"
 )
 
@@ -13,7 +14,7 @@ func TestDockerRuntime_Integration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	rt, err := New(ctx, runtime.Config{
+	rt, err := New(ctx, config.Runtime{
 		Image: "alpine:3.20",
 	})
 	if err != nil {

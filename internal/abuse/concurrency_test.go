@@ -9,8 +9,10 @@ func TestConcurrencyLimiter(t *testing.T) {
 	limiter := NewConcurrencyLimiter(3)
 
 	// Acquire up to max
-	if !limiter.TryAcquire() || !limiter.TryAcquire() || !limiter.TryAcquire() {
-		t.Fatal("expected 3 slots to be acquired successfully")
+	for i := 0; i < 3; i++ {
+		if !limiter.TryAcquire() {
+			t.Fatalf("expected slot %d to be acquired successfully", i+1)
+		}
 	}
 
 	if limiter.Active() != 3 {

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/labib0x9/docpine/internal/config"
 	"github.com/labib0x9/docpine/internal/runtime"
 )
 
@@ -55,21 +56,21 @@ fast microVM provisioning with true 1:1 hardware virtualization isolation.
 */
 
 func init() {
-	runtime.Register("firecracker", func(ctx context.Context, cfg runtime.Config) (runtime.Runtime, error) {
+	runtime.Register("firecracker", func(ctx context.Context, cfg config.Runtime) (runtime.Runtime, error) {
 		return New(ctx, cfg)
 	})
 }
 
 // FirecrackerRuntime manages Firecracker microVM lifecycles.
 type FirecrackerRuntime struct {
-	cfg        runtime.Config
+	cfg        config.Runtime
 	binPath    string
 	kernelPath string
 	rootfsPath string
 }
 
 // New creates a new Firecracker runtime instance.
-func New(ctx context.Context, cfg runtime.Config) (*FirecrackerRuntime, error) {
+func New(ctx context.Context, cfg config.Runtime) (*FirecrackerRuntime, error) {
 	bin := cfg.FirecrackerBin
 	if bin == "" {
 		bin = "firecracker"
@@ -290,6 +291,11 @@ type firecrackerSandbox struct {
 
 func (s *firecrackerSandbox) ID() string {
 	return s.id
+}
+
+// CgroupID returns ErrNotApplicable because Firecracker runs an isolated guest kernel invisible to host cgroups.
+func (s *firecrackerSandbox) CgroupID() (uint64, error) {
+	return 0, runtime.ErrNotApplicable
 }
 
 // AttachPTY connects to the guest serial console FIFOs.

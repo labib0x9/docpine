@@ -15,6 +15,8 @@ var (
 	ErrSandboxNotFound = errors.New("sandbox not found")
 	// ErrSandboxDestroyed is returned when attempting an operation on a destroyed sandbox.
 	ErrSandboxDestroyed = errors.New("sandbox has been destroyed")
+	// ErrNotApplicable is returned when an operation (such as host cgroup ID lookup) is not applicable for a backend (e.g. Firecracker).
+	ErrNotApplicable = errors.New("not applicable for this runtime backend")
 )
 
 // SandboxOptions specifies the configuration needed to provision a sandbox.
@@ -32,6 +34,8 @@ type SandboxOptions struct {
 type Sandbox interface {
 	// ID returns the unique identifier of the running sandbox.
 	ID() string
+	// CgroupID returns the host kernel cgroup ID if applicable (Docker, gVisor) or ErrNotApplicable (Firecracker).
+	CgroupID() (uint64, error)
 	// AttachPTY opens a bidirectional raw pseudo-terminal (PTY) stream to the sandbox process.
 	AttachPTY(ctx context.Context) (io.ReadWriteCloser, error)
 	// Destroy stops and cleans up the sandbox and all associated host resources.

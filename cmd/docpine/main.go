@@ -17,43 +17,45 @@ import (
 	_ "github.com/labib0x9/docpine/internal/runtime/gvisor"
 	"github.com/labib0x9/docpine/internal/session"
 	transporthttp "github.com/labib0x9/docpine/internal/transport/http"
-	"github.com/labib0x9/docpine/internal/websocket"
+	"github.com/labib0x9/docpine/internal/transport/websocket"
+	"github.com/labib0x9/docpine/pkg/logger"
 )
 
 func main() {
-	// Configure structured JSON/text logging
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	slog.SetDefault(logger)
+	cfg := config.GetConfig()
 
-	cfg := config.LoadFromEnv()
+	logCloser, err := logger.Setup(cfg.Logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
+	}
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
 
 	slog.Info("Starting Docpine Sandbox Engine",
-		"runtime", cfg.RuntimeName,
+		"runtime", cfg.Runtime.Name,
 		"addr", cfg.Addr,
-		"session_ttl", cfg.SessionTTL,
-		"max_concurrent_sessions", cfg.MaxConcurrent,
-		"pow_difficulty", cfg.PoWDifficulty,
-		"turnstile_enabled", cfg.TurnstileKey != "",
+		"session_ttl", cfg.Session.TTL,
+		"max_concurrent_sessions", cfg.Session.MaxConcurrent,
+		"turnstile_enabled", cfg.Abuse.TurnstileSecret != "",
 	)
 
 	// 1. Initialize Pluggable Runtime Backend with Prerequisite Validation
 	initCtx, initCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	rt, err := runtime.New(initCtx, cfg.RuntimeName, cfg.Runtime)
+	rt, err := runtime.New(initCtx, cfg.Runtime.Name, *cfg.Runtime)
 	initCancel()
 	if err != nil {
-		slog.Error("FATAL: Runtime backend initialization failed", "runtime", cfg.RuntimeName, "error", err)
-		fmt.Fprintf(os.Stderr, "\n[FATAL] Failed to initialize runtime backend %q: %v\n\n", cfg.RuntimeName, err)
+		slog.Error("FATAL: Runtime backend initialization failed", "runtime", cfg.Runtime.Name, "error", err)
+		fmt.Fprintf(os.Stderr, "\n[FATAL] Failed to initialize runtime backend %q: %v\n\n", cfg.Runtime.Name, err)
 		os.Exit(1)
 	}
 	defer rt.Close()
 
 	// 2. Initialize Abuse Protection Guard
-	guard := abuse.NewGuard(cfg.ToGuardConfig())
+	guard := abuse.NewGuard(*cfg)
 
 	// 3. Initialize Ephemeral Session Manager
-	mngr := session.NewManager(rt, cfg.SessionTTL)
+	mngr := session.NewManager(rt, cfg.Session.TTL)
 	mngr.OnDestroy(func(sessionID string) {
 		guard.ConcurrencyLimiter().Release()
 	})
@@ -66,7 +68,7 @@ func main() {
 	// 4. Initialize Transport and WebSocket Handlers
 	handler := transporthttp.NewSessionHandler(mngr, guard)
 	wsHandler := websocket.NewHandler(mngr)
-	server := transporthttp.NewServer(cfg.Addr, handler, wsHandler)
+	server := transporthttp.NewServer(cfg, handler, wsHandler)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

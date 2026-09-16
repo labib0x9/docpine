@@ -27,18 +27,7 @@ func NewSessionHandler(mngr *session.Manager, guard *abuse.Guard) *SessionHandle
 
 // RegisterRoutes registers HTTP routes on the serve mux.
 func (h *SessionHandler) RegisterRoutes(mux *http.ServeMux) {
-	mux.Handle(
-		"POST /sessions",
-		Cors(Preflight(http.HandlerFunc(h.Create))),
-	)
-	mux.Handle(
-		"GET /challenges/pow",
-		Cors(Preflight(http.HandlerFunc(h.GetPoWChallenge))),
-	)
-	mux.Handle(
-		"GET /healthz",
-		Cors(Preflight(http.HandlerFunc(h.Health))),
-	)
+	mux.HandleFunc("POST /sessions", h.Create)
 }
 
 // Create handles anonymous sandbox creation protected by the multi-layered abuse guard.
@@ -76,18 +65,4 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		"session_id":     sessionID,
 		"expires_in_sec": 300,
 	}, http.StatusCreated)
-}
-
-// GetPoWChallenge returns a fresh signed Proof-of-Work challenge for client pre-computation.
-func (h *SessionHandler) GetPoWChallenge(w http.ResponseWriter, r *http.Request) {
-	chal := h.guard.IssuePoWChallenge()
-	jsonio.SendJson(w, chal, http.StatusOK)
-}
-
-// Health reports service status and active session count.
-func (h *SessionHandler) Health(w http.ResponseWriter, r *http.Request) {
-	jsonio.SendJson(w, map[string]any{
-		"status":          "ok",
-		"active_sessions": h.mngr.ActiveCount(),
-	}, http.StatusOK)
 }

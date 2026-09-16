@@ -2,13 +2,60 @@
 
 ## 1. System Overview
 
-Docpine consists of two cooperating subsystems:
-- **Control Plane** (`cmd/docpine`): Manages container lifecycles, WebSocket PTY shell multiplexing, session timeouts (5-minute TTL), and abuse protection behind Cloudflare Tunnel.
-- **Runtime Security Engine** (`cmd/docpine-sensor`): Observes process activity inside containers via eBPF tracepoints, correlates temporal behavioral chains, and enforces in-kernel policies (BPF LSM, cgroup BPF).
+Docpine consists of two cooperating subsystems sharing one codebase and repository:
+- **Control Plane** (`cmd/docpine`): Manages sandbox lifecycles via the pluggable `Runtime`/`Sandbox` interface (Docker, gVisor, or Firecracker backends), WebSocket PTY shell multiplexing, session timeouts (5-minute TTL), and abuse protection behind Cloudflare Tunnel.
+- **Runtime Security Engine** (`cmd/docpine-sensor`): Observes process activity inside host-kernel sharing sandboxes (**Docker and gVisor**) via eBPF tracepoints, correlates temporal behavioral chains, and enforces in-kernel policies (BPF LSM, cgroup BPF, seccomp).
 
 ---
 
-## 2. Kernel vs. Userspace Enforcement Boundary
+## 2. Pluggable Runtime Architecture & Observability Boundaries
+
+```
+                         Docpine
+                            │
+              ┌─────────────┴─────────────┐
+              │                           │
+        Control Plane               Runtime Security
+              │                           │
+           Go API                     eBPF Loader
+              │                           │
+       Session Manager          ┌─────────┴─────────┐
+              │                 │         │         │
+      Runtime Interface    Tracepoints   LSM    Cgroup BPF
+      (Docker | gVisor)         │         │         │
+     Firecracker Sandboxes      │         │         │
+     excluded from this path ──>┼─────────┴─────────┘
+                                │
+                           Ring Buffer
+                                │
+                                ▼
+                         Security Engine
+                                │
+                  ┌─────────────┼─────────────┐
+                  ▼             ▼             ▼
+               Process      Container       Policy
+                State         State         Engine
+                  │             │             │
+                  └─────────────┼─────────────┘
+                                ▼
+                             Findings
+                                │
+                                ▼
+                            PostgreSQL
+```
+
+### Architectural Decisions on Sandbox Backends:
+1. **Firecracker is Out of Scope for Host eBPF Security**:
+   - Host-attached eBPF tracepoints observe the **host kernel**.
+   - A Firecracker microVM runs its own **guest Linux kernel** inside hardware virtualization (`/dev/kvm`). The host kernel never observes the guest's internal syscalls or process lifecycle.
+   - Observability inside Firecracker requires an in-guest agent running inside the microVM — a separate subsystem rather than host-side eBPF. Firecracker sandboxes return `runtime.ErrNotApplicable` for cgroup ID inspection, and the security engine ignores them cleanly without error.
+2. **gVisor (runsc) Sentry Interception**:
+   - gVisor's sandboxed application syscalls are intercepted in userspace by its Sentry kernel (`ptrace` or `systrap` platform).
+   - Host eBPF tracepoints observe the Sentry process's host syscalls. Phase 1 validates the correlation fidelity between Sentry host syscalls and container actions.
+
+---
+
+## 3. Kernel vs. Userspace Enforcement Boundary
 
 ```
                     Linux Kernel Space
@@ -43,12 +90,12 @@ Docpine consists of two cooperating subsystems:
 
 ### Critical Architectural Constraint:
 **Go never sits in the hot path of syscall enforcement.**
-- When a container executes `connect()` or `openat()`, the decision is evaluated **synchronously inside the kernel** against pre-populated BPF maps.
+- When a container executes `connect()` or `openat()`, the decision is evaluated **synchronously inside the kernel** against pre-populated BPF maps (`cgroup/connect4`, `cgroup/connect6`, `lsm/file_open`).
 - Go's responsibility is to compile high-level security policies into BPF map entries asynchronously and receive event telemetry via the ring buffer for out-of-band behavioral correlation.
 
 ---
 
-## 3. Cgroup-ID Based Container Identity
+## 4. Cgroup-ID Based Container Identity
 
 In containerized Linux environments, relying on process IDs (`pid_t`) alone for tracking is fundamentally flawed:
 1. **PID Reuse**: In short-lived container processes, PIDs wrap around quickly.
@@ -56,7 +103,7 @@ In containerized Linux environments, relying on process IDs (`pid_t`) alone for 
 3. **`/proc` Scraping Races**: Inspecting `/proc/<pid>/cgroup` from userspace suffers from TOCTOU race conditions where the process terminates before `/proc` can be read.
 
 ### Docpine Solution:
-Docpine captures the container's 64-bit cgroup ID (`cgroup_id`) directly at creation time. In the kernel:
+Docpine captures the container's 64-bit cgroup ID (`cgroup_id`) directly at creation time via the `Runtime`/`Sandbox` interface. In the kernel:
 ```c
 __u64 cgroup_id = bpf_get_current_cgroup_id();
 ```
@@ -64,13 +111,13 @@ Every kernel event is tagged with `cgroup_id` before entering the ring buffer. U
 
 ---
 
-## 4. Precision Note: Namespace Tracking Caveat
+## 5. Precision Note: Namespace Tracking Caveat
 
 When capturing baseline namespace identities from the host, reading `task_struct->nsproxy->pid_ns_for_children` indicates the namespace that will be assigned to *future child processes*, which does not necessarily reflect the process's own current PID namespace. Docpine strictly inspects `/proc/<pid>/ns/*` inodes directly at container init.
 
 ---
 
-## 5. Performance & Overhead Benchmarks
+## 6. Performance & Overhead Benchmarks
 
 | Metric | Tracepoint Detached | Tracepoint Attached (Docpine eBPF) | Kernel Aggregated (`LRU_HASH`) |
 | :--- | :--- | :--- | :--- |
@@ -78,3 +125,4 @@ When capturing baseline namespace identities from the host, reading `task_struct
 | **Ringbuf Event Throughput** | N/A | ~450,000 events/sec | ~1,200,000 events/sec |
 | **Drop Rate under 10k ops/sec** | 0.00% | 0.00% | 0.00% |
 | **Go Processing Throughput** | N/A | ~180,000 events/sec | ~350,000 events/sec |
+

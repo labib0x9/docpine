@@ -30,3 +30,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+.markdown-collab/*
+
+# Log files
+*.log
+logs/
