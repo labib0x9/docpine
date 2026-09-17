@@ -3,24 +3,15 @@ package http
 import (
 	"net/http"
 
-	"github.com/labib0x9/docpine/internal/config"
+	"github.com/labib0x9/docpine/internal/utils"
 )
-
-var allowedOrigins map[string]bool
-
-func initAllowedOrigins(cnf *config.Config) {
-	allowedOrigins = make(map[string]bool)
-	for _, origin := range cnf.AllowedOrigins {
-		allowedOrigins[origin] = true
-	}
-}
 
 // Cors provides cross-origin resource sharing headers and handles OPTIONS preflights.
 func Cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 
-		if origin != "" && (allowedOrigins["*"] || allowedOrigins[origin]) {
+		if utils.CheckOrigin(r) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}

@@ -45,7 +45,6 @@ func (rl *RateLimiter) Allow(ip, cookieID string) (bool, time.Duration) {
 
 	now := time.Now()
 
-	// 1. Get or create pair limiter
 	pairKey := ip + ":" + cookieID
 	pairE, exists := rl.pairs[pairKey]
 	if !exists {
@@ -58,7 +57,6 @@ func (rl *RateLimiter) Allow(ip, cookieID string) (bool, time.Duration) {
 		pairE.lastSeen = now
 	}
 
-	// 2. Get or create IP-only limiter (2x burst for network tolerance)
 	ipE, exists := rl.ipOnly[ip]
 	if !exists {
 		ipE = &entry{
@@ -70,7 +68,6 @@ func (rl *RateLimiter) Allow(ip, cookieID string) (bool, time.Duration) {
 		ipE.lastSeen = now
 	}
 
-	// 3. Check pair reservation
 	rPair := pairE.limiter.Reserve()
 	if !rPair.OK() || rPair.Delay() > 0 {
 		delay := rPair.Delay()
@@ -78,11 +75,10 @@ func (rl *RateLimiter) Allow(ip, cookieID string) (bool, time.Duration) {
 		return false, delay
 	}
 
-	// 4. Check IP reservation
 	rIP := ipE.limiter.Reserve()
 	if !rIP.OK() || rIP.Delay() > 0 {
 		delay := rIP.Delay()
-		rPair.Cancel() // Rollback pair reservation if IP limit is exceeded
+		rPair.Cancel()
 		rIP.Cancel()
 		return false, delay
 	}

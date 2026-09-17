@@ -140,11 +140,9 @@ func Setup(cfg *config.Logger) (io.Closer, error) {
 		return slog.NewTextHandler(w, opts)
 	}
 
-	// 1. Console (Stdout) Handler
 	stdoutHandler := createBaseHandler(os.Stdout, consoleLevel)
 	handlers = append(handlers, stdoutHandler)
 
-	// 2. 4-File Directory Mode (debug.log, info.log, warn.log, error.log)
 	if cfg != nil && cfg.Directory != "" {
 		if err := os.MkdirAll(cfg.Directory, 0755); err != nil {
 			return nil, err
@@ -199,7 +197,6 @@ func Setup(cfg *config.Logger) (io.Closer, error) {
 			handlers = append(handlers, filterHandler)
 		}
 	} else if cfg != nil && cfg.Filename != "" {
-		// 3. Single File Mode
 		rotator := &lumberjack.Logger{
 			Filename:   cfg.Filename,
 			MaxSize:    cfg.MaxSize,

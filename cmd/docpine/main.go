@@ -16,7 +16,8 @@ import (
 	_ "github.com/labib0x9/docpine/internal/runtime/firecracker"
 	_ "github.com/labib0x9/docpine/internal/runtime/gvisor"
 	"github.com/labib0x9/docpine/internal/session"
-	transporthttp "github.com/labib0x9/docpine/internal/transport/http"
+	"github.com/labib0x9/docpine/internal/transport"
+	"github.com/labib0x9/docpine/internal/transport/http"
 	"github.com/labib0x9/docpine/internal/transport/websocket"
 	"github.com/labib0x9/docpine/pkg/logger"
 )
@@ -40,7 +41,6 @@ func main() {
 		"turnstile_enabled", cfg.Abuse.TurnstileSecret != "",
 	)
 
-	// 1. Initialize Pluggable Runtime Backend with Prerequisite Validation
 	initCtx, initCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	rt, err := runtime.New(initCtx, cfg.Runtime.Name, *cfg.Runtime)
 	initCancel()
@@ -51,10 +51,8 @@ func main() {
 	}
 	defer rt.Close()
 
-	// 2. Initialize Abuse Protection Guard
 	guard := abuse.NewGuard(*cfg)
 
-	// 3. Initialize Ephemeral Session Manager
 	mngr := session.NewManager(rt, cfg.Session.TTL)
 	mngr.OnDestroy(func(sessionID string) {
 		guard.ConcurrencyLimiter().Release()
@@ -65,10 +63,9 @@ func main() {
 		_ = mngr.Close(shutdownCtx)
 	}()
 
-	// 4. Initialize Transport and WebSocket Handlers
-	handler := transporthttp.NewSessionHandler(mngr, guard)
-	wsHandler := websocket.NewHandler(mngr)
-	server := transporthttp.NewServer(cfg, handler, wsHandler)
+	handler := http.NewSessionHandler(mngr, guard)
+	wsHandler := websocket.NewHandler(mngr, *cfg.Logger)
+	server := transport.NewServer(cfg, handler, wsHandler)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

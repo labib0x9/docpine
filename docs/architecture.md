@@ -1,128 +1,91 @@
-# Docpine Architecture: eBPF Runtime Security & Kernel-Level Policy Enforcement
+# Docpine Architecture: Pluggable Sandbox Platform
 
 ## 1. System Overview
 
-Docpine consists of two cooperating subsystems sharing one codebase and repository:
-- **Control Plane** (`cmd/docpine`): Manages sandbox lifecycles via the pluggable `Runtime`/`Sandbox` interface (Docker, gVisor, or Firecracker backends), WebSocket PTY shell multiplexing, session timeouts (5-minute TTL), and abuse protection behind Cloudflare Tunnel.
-- **Runtime Security Engine** (`cmd/docpine-sensor`): Observes process activity inside host-kernel sharing sandboxes (**Docker and gVisor**) via eBPF tracepoints, correlates temporal behavioral chains, and enforces in-kernel policies (BPF LSM, cgroup BPF, seccomp).
+Docpine is an ephemeral container and sandbox provisioning engine designed for running isolated, disposable Linux execution environments on-demand.
+
+Key system capabilities:
+- **Pluggable Sandbox Runtimes**: Standardized backend engine interface supporting **Docker containers**, **gVisor (`runsc`) userspace kernel sandboxes**, and **Firecracker microVMs** with automatic prerequisite detection and fail-fast validation.
+- **Layered Abuse Protection**: Defense-in-depth protection for anonymous public endpoints behind Cloudflare Tunnel (`cloudflared`), featuring real client IP extraction, signed device cookies (HMAC-SHA256), token-bucket rate limiting, Cloudflare Turnstile, and a global concurrency cap.
+- **Ephemeral Session Lifecycle**: In-memory registry with a strict 5-minute TTL reaper, graceful draining, and asynchronous sandbox destruction.
+- **Bidirectional WebSocket PTY**: Low-latency interactive pseudo-terminal streaming using xterm.js-compatible binary streams.
 
 ---
 
-## 2. Pluggable Runtime Architecture & Observability Boundaries
+## 2. Core Architecture Diagram
 
 ```
-                         Docpine
-                            │
-              ┌─────────────┴─────────────┐
-              │                           │
-        Control Plane               Runtime Security
-              │                           │
-           Go API                     eBPF Loader
-              │                           │
-       Session Manager          ┌─────────┴─────────┐
-              │                 │         │         │
-      Runtime Interface    Tracepoints   LSM    Cgroup BPF
-      (Docker | gVisor)         │         │         │
-     Firecracker Sandboxes      │         │         │
-     excluded from this path ──>┼─────────┴─────────┘
-                                │
-                           Ring Buffer
-                                │
-                                ▼
-                         Security Engine
-                                │
-                  ┌─────────────┼─────────────┐
-                  ▼             ▼             ▼
-               Process      Container       Policy
-                State         State         Engine
-                  │             │             │
-                  └─────────────┼─────────────┘
-                                ▼
-                             Findings
-                                │
-                                ▼
-                            PostgreSQL
+                                    Incoming Traffic
+                                           │
+                        ┌──────────────────┴──────────────────┐
+                        │   Cloudflare Edge (Rate Limiting)   │
+                        └──────────────────┬──────────────────┘
+                                           │ Cloudflare Tunnel (cloudflared)
+                                           ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 CONTROL PLANE (cmd/docpine)                                 │
+│                                                                                             │
+│   ┌─────────────────────────────────────────────────────────────────────────────────────┐   │
+│   │                              Abuse Protection Guard                                 │   │
+│   │  • Real IP Extraction (CF-Connecting-IP)       • Cloudflare Turnstile Gate          │   │
+│   │  • Signed Device Cookie (__dp_dev HMAC)        • Combined (IP, Cookie) Token Bucket │   │
+│   │  • Global Concurrency Cap (Backstop)                                                │   │
+│   └──────────────────────────────────┬──────────────────────────────────────────────────┘   │
+│                                      │ (Allowed)                                            │
+│                                      ▼                                                      │
+│   ┌─────────────────────────────────────────────────────────────────────────────────────┐   │
+│   │                 Session Manager (In-Memory Registry + 5-minute TTL Reaper)          │   │
+│   └──────────────────────────────────┬──────────────────────────────────────────────────┘   │
+│                                      │                                                      │
+│                                      ▼                                                      │
+│   ┌─────────────────────────────────────────────────────────────────────────────────────┐   │
+│   │                            internal/runtime (Interface)                             │   │
+│   │              DOCPINE_RUNTIME = docker | gvisor (runsc) | firecracker                │   │
+│   └───────────────┬──────────────────────────┬──────────────────────────┬───────────────┘   │
+└───────────────────┼──────────────────────────┼──────────────────────────┼───────────────────┘
+                    │                          │                          │
+                    ▼                          ▼                          ▼
+          ┌───────────────────┐      ┌───────────────────┐      ┌───────────────────┐
+          │  Docker Sandbox   │      │  gVisor (runsc)   │      │Firecracker MicroVM│
+          │ (Alpine 3.20 PTY) │      │  (Sentry Sandbox) │      │(Guest Serial PTY) │
+          └───────────────────┘      └───────────────────┘      └───────────────────┘
 ```
-
-### Architectural Decisions on Sandbox Backends:
-1. **Firecracker is Out of Scope for Host eBPF Security**:
-   - Host-attached eBPF tracepoints observe the **host kernel**.
-   - A Firecracker microVM runs its own **guest Linux kernel** inside hardware virtualization (`/dev/kvm`). The host kernel never observes the guest's internal syscalls or process lifecycle.
-   - Observability inside Firecracker requires an in-guest agent running inside the microVM — a separate subsystem rather than host-side eBPF. Firecracker sandboxes return `runtime.ErrNotApplicable` for cgroup ID inspection, and the security engine ignores them cleanly without error.
-2. **gVisor (runsc) Sentry Interception**:
-   - gVisor's sandboxed application syscalls are intercepted in userspace by its Sentry kernel (`ptrace` or `systrap` platform).
-   - Host eBPF tracepoints observe the Sentry process's host syscalls. Phase 1 validates the correlation fidelity between Sentry host syscalls and container actions.
 
 ---
 
-## 3. Kernel vs. Userspace Enforcement Boundary
+## 3. Pluggable Runtime Layer
 
-```
-                    Linux Kernel Space
-                            │
-              ┌─────────────┴─────────────┐
-              │                           │
-         eBPF Observe                eBPF Enforce
-              │                           │
-      Tracepoints (sys_enter,             │ Synchronous
-       sched_process_exec)                ▼
-              │                     [ BPF Maps ]
-              │                 (net_policy_map,
-              ▼                  fs_deny_policy_map)
-         RINGBUF Map                      │
-              │                           ▼
-              │                   BPF LSM (file_open)
-              │                 cgroup BPF (connect4/6)
-              │                    seccomp-bpf
-              │
-══════════════╪═══════════════════════════╪══════════════════════
-              │ Userspace Boundary        │
-              ▼                           ▲
-     Ring Buffer Reader                   │
-              │                           │ BPF Map Writes
-              ▼                           │ (Async)
-      Security Engine ────────────────────┘
-   (Correlation & Policy Compiler)
-              │
-              ▼
-         PostgreSQL
+Docpine completely decouples session tracking and WebSocket multiplexing from the underlying container technology via the `runtime.Runtime` interface in `internal/runtime`:
+
+```go
+type Runtime interface {
+    Name() string
+    CheckPrerequisites(ctx context.Context) error
+    CreateSandbox(ctx context.Context, opts SandboxOptions) (Sandbox, error)
+    Close() error
+}
+
+type Sandbox interface {
+    ID() string
+    AttachPTY(ctx context.Context) (io.ReadWriteCloser, error)
+    Destroy(ctx context.Context) error
+}
 ```
 
-### Critical Architectural Constraint:
-**Go never sits in the hot path of syscall enforcement.**
-- When a container executes `connect()` or `openat()`, the decision is evaluated **synchronously inside the kernel** against pre-populated BPF maps (`cgroup/connect4`, `cgroup/connect6`, `lsm/file_open`).
-- Go's responsibility is to compile high-level security policies into BPF map entries asynchronously and receive event telemetry via the ring buffer for out-of-band behavioral correlation.
+### Backend Comparison & Architectural Tradeoffs
 
----
-
-## 4. Cgroup-ID Based Container Identity
-
-In containerized Linux environments, relying on process IDs (`pid_t`) alone for tracking is fundamentally flawed:
-1. **PID Reuse**: In short-lived container processes, PIDs wrap around quickly.
-2. **PID Namespaces**: Inside a container, the main process is PID 1, while on the host it may be PID 49201.
-3. **`/proc` Scraping Races**: Inspecting `/proc/<pid>/cgroup` from userspace suffers from TOCTOU race conditions where the process terminates before `/proc` can be read.
-
-### Docpine Solution:
-Docpine captures the container's 64-bit cgroup ID (`cgroup_id`) directly at creation time via the `Runtime`/`Sandbox` interface. In the kernel:
-```c
-__u64 cgroup_id = bpf_get_current_cgroup_id();
-```
-Every kernel event is tagged with `cgroup_id` before entering the ring buffer. Userspace resolves `cgroup_id -> container_id` in $O(1)$ time with zero `/proc` scraping.
-
----
-
-## 5. Precision Note: Namespace Tracking Caveat
-
-When capturing baseline namespace identities from the host, reading `task_struct->nsproxy->pid_ns_for_children` indicates the namespace that will be assigned to *future child processes*, which does not necessarily reflect the process's own current PID namespace. Docpine strictly inspects `/proc/<pid>/ns/*` inodes directly at container init.
-
----
-
-## 6. Performance & Overhead Benchmarks
-
-| Metric | Tracepoint Detached | Tracepoint Attached (Docpine eBPF) | Kernel Aggregated (`LRU_HASH`) |
+| Backend | Driver | Host Prerequisites | Architectural Tradeoffs |
 | :--- | :--- | :--- | :--- |
-| **Syscall Latency (`sys_enter`)** | ~0.14 µs | ~0.21 µs (+70 ns) | ~0.18 µs (+40 ns) |
-| **Ringbuf Event Throughput** | N/A | ~450,000 events/sec | ~1,200,000 events/sec |
-| **Drop Rate under 10k ops/sec** | 0.00% | 0.00% | 0.00% |
-| **Go Processing Throughput** | N/A | ~180,000 events/sec | ~350,000 events/sec |
+| **Docker** | `docker` | Docker daemon reachable | Standard sibling-container execution using Docker API hijack streaming. Fast, ubiquitous, minimal configuration. |
+| **gVisor** | `gvisor` | `runsc` on `$PATH` + Docker daemon `runsc` runtime | Drives `runsc` via Docker daemon configuration, gaining OCI image distribution and network isolation while gVisor's Sentry kernel intercepts syscalls in user space. |
+| **Firecracker** | `firecracker` | Linux `/dev/kvm`, `firecracker` binary, `vmlinux`, `rootfs.ext4` | Wires guest serial console `ttyS0` to named host FIFOs. Zero guest agent dependencies, instantaneous boot terminal access, and pure 1:1 hardware virtualization isolation per session. |
 
+---
+
+## 4. Layered Abuse Protection
+
+1. **Real IP Extraction**: Strictly reads `CF-Connecting-IP` (falling back to first `X-Forwarded-For` entry or `RemoteAddr`), preventing IP spoofing behind reverse proxies.
+2. **Signed Device Cookie (`__dp_dev`)**: HMAC-SHA256 signed cookie identifying client devices across IP rotations.
+3. **Dual Token-Bucket Rate Limiter**: Per-IP and per-Device bucket limiting burst and refill rates.
+4. **Cloudflare Turnstile Verification**: Challenge token verification for human verification.
+5. **Global Concurrency Cap**: Strict aggregate limit of simultaneous active sandboxes with immediate 429 backoff when full.

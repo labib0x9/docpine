@@ -1,4 +1,4 @@
-package http
+package transport
 
 import (
 	"context"
@@ -8,21 +8,23 @@ import (
 	"net/http"
 
 	"github.com/labib0x9/docpine/internal/config"
+	t_http "github.com/labib0x9/docpine/internal/transport/http"
 	"github.com/labib0x9/docpine/internal/transport/websocket"
+	"github.com/labib0x9/docpine/internal/utils"
 )
 
 // Server wraps the standard HTTP server multiplexing REST and WebSocket handlers.
 type Server struct {
 	addr      string
 	server    *http.Server
-	handler   *SessionHandler
+	handler   *t_http.SessionHandler
 	wsHandler *websocket.Handler
 }
 
 // NewServer constructs a new HTTP server.
-func NewServer(cnf *config.Config, handler *SessionHandler, wsHandler *websocket.Handler) *Server {
+func NewServer(cnf *config.Config, handler *t_http.SessionHandler, wsHandler *websocket.Handler) *Server {
 	addr := fmt.Sprintf("%s:%d", cnf.Addr, cnf.Port)
-	initAllowedOrigins(cnf)
+	utils.InitAllowedOrigins(cnf)
 	return &Server{
 		addr:      addr,
 		handler:   handler,
@@ -39,7 +41,7 @@ func (s *Server) Start() error {
 
 	s.server = &http.Server{
 		Addr:    s.addr,
-		Handler: RequestId(Logger(Cors(mux))),
+		Handler: t_http.RequestId(t_http.Logger(t_http.Cors(mux))),
 	}
 
 	fmt.Printf("Docpine listening on http://%s\n", s.addr)

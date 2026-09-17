@@ -16,7 +16,7 @@ import (
 const (
 	// DeviceCookieName is the HTTP cookie name for the anonymous device identifier.
 	DeviceCookieName = "__dp_dev"
-	// DeviceCookieMaxAge specifies cookie validity (30 days).
+	// DeviceCookieMaxAge specifies cookie validity (10 Minutes).
 	DeviceCookieMaxAge = 10 * 60
 )
 
@@ -85,7 +85,7 @@ func (m *DeviceCookieManager) GetOrSet(w http.ResponseWriter, r *http.Request) s
 		Path:     "/",
 		MaxAge:   DeviceCookieMaxAge,
 		HttpOnly: true,
-		Secure:   false, // Set to true by proxy/TLS in production
+		Secure:   true,
 		SameSite: http.SameSiteNoneMode,
 	})
 

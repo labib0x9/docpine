@@ -4,11 +4,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
     build-essential \
-    clang \
-    llvm \
-    libelf-dev \
-    linux-headers-generic \
-    bpftool \
     pkg-config \
     git \
     curl \

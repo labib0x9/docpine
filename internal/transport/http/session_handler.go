@@ -44,13 +44,11 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 1. Abuse Protection Gate
 	passed, releaseSlot := h.guard.CheckAnonymousCreate(w, r, payload)
 	if !passed {
 		return
 	}
 
-	// 2. Provision Ephemeral Sandbox
 	sessionID, err := h.mngr.Create(r.Context())
 	if err != nil {
 		releaseSlot()
@@ -59,7 +57,7 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = releaseSlot // Held for lifetime of session
+	_ = releaseSlot
 
 	jsonio.SendJson(w, map[string]any{
 		"session_id":     sessionID,

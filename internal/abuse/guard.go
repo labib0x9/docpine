@@ -47,7 +47,6 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 	clientIP := GetClientIP(r)
 	deviceID := g.cookieMgr.GetOrSet(w, r)
 
-	// Layer 6: Global Concurrency Cap (Hard Backstop against Aggregate Host Load)
 	if !g.concurrency.TryAcquire() {
 		slog.Warn("Session create rejected: aggregate capacity exhausted",
 			"client_ip", clientIP,
@@ -64,7 +63,6 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 		return false, nil
 	}
 
-	// Slot acquired - ensure it gets released if any subsequent check fails
 	slotReleased := false
 	release := func() {
 		if !slotReleased {
@@ -73,10 +71,8 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 		}
 	}
 
-	// Layer 4 & 5: Cloudflare Turnstile Challenge Verification
 	needsTurnstile := g.turnstile.IsEnabled()
 
-	// Check Turnstile token if configured
 	if needsTurnstile {
 		token := ""
 		if payload != nil {
@@ -107,7 +103,6 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 		}
 	}
 
-	// Layer 1-3: Per-IP + Signed Device Cookie Token Bucket Rate Limiting (Single Abusive Client Defense)
 	allowed, retryAfter := g.rateLimiter.Allow(clientIP, deviceID)
 	if !allowed {
 		release()

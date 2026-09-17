@@ -11,17 +11,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-type PostgreSQL struct {
-	User          string
-	Pass          string
-	Port          string
-	Addr          string
-	DatabaseName  string
-	SslMode       string
-	SuperUser     string
-	SuperDatabase string
-}
-
 type Runtime struct {
 	Name           string
 	Image          string
@@ -46,11 +35,6 @@ type Session struct {
 	MaxConcurrent int
 }
 
-type Sensor struct {
-	Addr string
-	Port int
-}
-
 type Logger struct {
 	Directory  string
 	Filename   string
@@ -70,8 +54,6 @@ type Config struct {
 	Runtime        *Runtime
 	Session        *Session
 	Abuse          *Abuse
-	PostgreSQL     *PostgreSQL
-	Sensor         *Sensor
 	Logger         *Logger
 	AllowedOrigins []string
 }
@@ -113,9 +95,6 @@ func loadConfig() {
 	viper.SetDefault("MAX_SESSIONS", 20)
 	viper.SetDefault("RATE_LIMIT_BURST", 5)
 	viper.SetDefault("RATE_LIMIT_REFILL", "30s")
-	viper.SetDefault("SENSOR_ADDR", "0.0.0.0")
-	viper.SetDefault("SENSOR_PORT", 8081)
-	viper.SetDefault("PG_SSLMODE", "disable")
 	viper.SetDefault("LOG_DIR", "")
 	viper.SetDefault("LOG_FILE", "")
 	viper.SetDefault("LOG_MAX_SIZE", 100)
@@ -163,20 +142,6 @@ func loadConfig() {
 			CookieSecret:    cookieSecret,
 			RateBurst:       viper.GetInt("RATE_LIMIT_BURST"),
 			RateRefillRate:  rateRefill,
-		},
-		PostgreSQL: &PostgreSQL{
-			User:          required("PG_USER"),
-			Pass:          required("PG_PASSWORD"),
-			Port:          required("PG_PORT"),
-			Addr:          required("PG_ADDRESS"),
-			DatabaseName:  required("PG_NAME"),
-			SslMode:       required("PG_SSLMODE"),
-			SuperUser:     required("PG_SUPERUSER"),
-			SuperDatabase: required("PG_SUPERDB"),
-		},
-		Sensor: &Sensor{
-			Addr: required("SENSOR_ADDR"),
-			Port: viper.GetInt("SENSOR_PORT"),
 		},
 		Logger: &Logger{
 			Directory:  viper.GetString("LOG_DIR"),

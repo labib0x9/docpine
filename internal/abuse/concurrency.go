@@ -20,7 +20,7 @@ type ConcurrencyLimiter struct {
 // NewConcurrencyLimiter creates a limiter with the specified maximum ceiling.
 func NewConcurrencyLimiter(maxConcurrent int) *ConcurrencyLimiter {
 	if maxConcurrent <= 0 {
-		maxConcurrent = 20
+		maxConcurrent = 12
 	}
 	return &ConcurrencyLimiter{
 		maxConcurrent: int64(maxConcurrent),

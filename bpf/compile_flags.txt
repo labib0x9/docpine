@@ -1,8 +1,0 @@
--target
-bpf
--O2
--Wall
--Wno-unused-value
--Wno-pointer-sign
--Wno-compare-distinct-pointer-types
--I/Users/labib0x9/Desktop/dockpine/bpf/common
