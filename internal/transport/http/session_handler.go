@@ -2,7 +2,6 @@ package http
 
 import (
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 
@@ -32,16 +31,13 @@ func (h *SessionHandler) RegisterRoutes(mux *http.ServeMux) {
 
 // Create handles anonymous sandbox creation protected by the multi-layered abuse guard.
 func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
+	rId := r.Header.Get("X-Request-ID")
 	var payload *abuse.CreateRequestPayload
 
-	if r.Body != nil {
-		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 16*1024))
-		if err == nil && len(bodyBytes) > 0 {
-			var p abuse.CreateRequestPayload
-			if err := json.Unmarshal(bodyBytes, &p); err == nil {
-				payload = &p
-			}
-		}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		slog.Error("Invalid request payload", "request_id", rId, "error", err)
+		jsonio.SendError(w, "invalid request payload", http.StatusBadRequest)
+		return
 	}
 
 	passed, releaseSlot := h.guard.CheckAnonymousCreate(w, r, payload)
@@ -52,7 +48,7 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	sessionID, err := h.mngr.Create(r.Context())
 	if err != nil {
 		releaseSlot()
-		slog.Error("Session creation failed", "error", err)
+		slog.Error("Session creation failed", "request_id", rId, "error", err)
 		jsonio.SendError(w, "internal server error provisioning sandbox", http.StatusInternalServerError)
 		return
 	}

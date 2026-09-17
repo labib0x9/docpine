@@ -36,3 +36,5 @@ go.work.sum
 # Log files
 *.log
 logs/
+
+cmd/test/*

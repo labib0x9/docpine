@@ -31,7 +31,7 @@ func NewGuard(cfg config.Config) *Guard {
 
 // CreateRequestPayload represents client-submitted abuse prevention tokens during session creation.
 type CreateRequestPayload struct {
-	TurnstileToken string `json:"turnstile_token,omitempty"`
+	TurnstileToken string `json:"cf-turnstile-response,omitempty"`
 }
 
 // ChallengeResponsePayload is returned when a client must solve a challenge before creation.
@@ -77,9 +77,6 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 		token := ""
 		if payload != nil {
 			token = payload.TurnstileToken
-		}
-		if token == "" {
-			token = r.Header.Get("CF-Turnstile-Response")
 		}
 
 		if token == "" {

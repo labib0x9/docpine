@@ -117,6 +117,13 @@ func loadConfig() {
 	sessionTTL := viper.GetDuration("SESSION_TTL")
 	rateRefill := viper.GetDuration("RATE_LIMIT_REFILL")
 
+	origins := viper.GetString("ALLOWED_ORIGINS")
+	allowedOrigins := make([]string, 0, 10)
+
+	for _, origin := range strings.Split(origins, ",") {
+		allowedOrigins = append(allowedOrigins, strings.TrimSpace(origin))
+	}
+
 	configuration = &Config{
 		Version: required("VERSION"),
 		Addr:    viper.GetString("ADDR"),
@@ -153,7 +160,7 @@ func loadConfig() {
 			Format:     viper.GetString("LOG_FORMAT"),
 			Level:      viper.GetString("LOG_LEVEL"),
 		},
-		AllowedOrigins: viper.GetStringSlice("ALLOWED_ORIGINS"),
+		AllowedOrigins: allowedOrigins,
 	}
 }
 
