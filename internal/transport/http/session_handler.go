@@ -40,7 +40,7 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	passed, releaseSlot := h.guard.CheckAnonymousCreate(w, r, payload)
+	passed, deviceID, releaseSlot := h.guard.CheckAnonymousCreate(w, r, payload)
 	if !passed {
 		return
 	}
@@ -53,7 +53,7 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = releaseSlot
+	h.guard.RegisterSession(deviceID, sessionID)
 
 	jsonio.SendJson(w, map[string]any{
 		"session_id":     sessionID,

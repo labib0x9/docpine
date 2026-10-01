@@ -185,23 +185,6 @@ func (m *Manager) ActiveCount() int {
 	return count
 }
 
-// AllSessions returns a snapshot list of active sessions.
-func (m *Manager) AllSessions() []SessionInfo {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	list := make([]SessionInfo, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		list = append(list, SessionInfo{
-			ID:        s.ID,
-			SandboxID: s.Sandbox.ID(),
-			CreatedAt: s.CreatedAt,
-			ExpiresAt: s.ExpiresAt,
-		})
-	}
-	return list
-}
-
 // Close gracefully stops the reaper and destroys all active sandboxes.
 func (m *Manager) Close(ctx context.Context) error {
 	m.reaperStop()

@@ -85,7 +85,7 @@ type Sandbox interface {
 ## 4. Layered Abuse Protection
 
 1. **Real IP Extraction**: Strictly reads `CF-Connecting-IP` (falling back to first `X-Forwarded-For` entry or `RemoteAddr`), preventing IP spoofing behind reverse proxies.
-2. **Signed Device Cookie (`__dp_dev`)**: HMAC-SHA256 signed cookie identifying client devices across IP rotations.
+2. **Signed Device Cookie (`__dp_dev`) & Single-Session Gate**: HMAC-SHA256 signed cookie identifying client devices across IP rotations and restricting clients to 1 active sandbox session at a time (HTTP 409 Conflict).
 3. **Dual Token-Bucket Rate Limiter**: Per-IP and per-Device bucket limiting burst and refill rates.
 4. **Cloudflare Turnstile Verification**: Challenge token verification for human verification.
 5. **Global Concurrency Cap**: Strict aggregate limit of simultaneous active sandboxes with immediate 429 backoff when full.

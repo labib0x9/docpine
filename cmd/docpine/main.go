@@ -55,6 +55,7 @@ func main() {
 
 	mngr := session.NewManager(rt, cfg.Session.TTL)
 	mngr.OnDestroy(func(sessionID string) {
+		guard.ReleaseSession(sessionID)
 		guard.ConcurrencyLimiter().Release()
 	})
 	defer func() {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/labib0x9/docpine/internal/config"
@@ -13,19 +14,24 @@ import (
 
 // Guard coordinates the multi-layered abuse protection pipeline for anonymous sessions.
 type Guard struct {
-	cookieMgr   *DeviceCookieManager
-	rateLimiter *RateLimiter
-	turnstile   *TurnstileValidator
-	concurrency *ConcurrencyLimiter
+	cookieMgr      *DeviceCookieManager
+	rateLimiter    *RateLimiter
+	turnstile      *TurnstileValidator
+	concurrency    *ConcurrencyLimiter
+	mu             sync.Mutex
+	deviceSessions map[string]string
+	sessionDevices map[string]string
 }
 
 // NewGuard constructs a fully configured Guard.
 func NewGuard(cfg config.Config) *Guard {
 	return &Guard{
-		cookieMgr:   NewDeviceCookieManager(cfg.Abuse.CookieSecret),
-		rateLimiter: NewRateLimiter(cfg.Abuse.RateBurst, cfg.Abuse.RateRefillRate),
-		turnstile:   NewTurnstileValidator(cfg.Abuse.TurnstileSecret),
-		concurrency: NewConcurrencyLimiter(cfg.Session.MaxConcurrent),
+		cookieMgr:      NewDeviceCookieManager(cfg.Abuse.CookieSecret),
+		rateLimiter:    NewRateLimiter(cfg.Abuse.RateBurst, cfg.Abuse.RateRefillRate),
+		turnstile:      NewTurnstileValidator(cfg.Abuse.TurnstileSecret),
+		concurrency:    NewConcurrencyLimiter(cfg.Session.MaxConcurrent),
+		deviceSessions: make(map[string]string),
+		sessionDevices: make(map[string]string),
 	}
 }
 
@@ -42,10 +48,23 @@ type ChallengeResponsePayload struct {
 }
 
 // CheckAnonymousCreate evaluates all abuse layers for an incoming anonymous create request.
-// Returns (proceed, releaseSlotFunc).
-func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, payload *CreateRequestPayload) (bool, func()) {
+// Returns (proceed, deviceID, releaseSlotFunc).
+func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, payload *CreateRequestPayload) (bool, string, func()) {
 	clientIP := GetClientIP(r)
 	deviceID := g.cookieMgr.GetOrSet(w, r)
+
+	if g.HasActiveDeviceSession(deviceID) {
+		slog.Warn("Session create rejected: active session already exists for device",
+			"client_ip", clientIP,
+			"device_id", deviceID,
+		)
+		jsonio.SendJson(w, map[string]any{
+			"error":   "device_session_active",
+			"message": "An active sandbox session already exists for this device. Please wait until your current session expires or terminates.",
+			"code":    http.StatusConflict,
+		}, http.StatusConflict)
+		return false, deviceID, nil
+	}
 
 	if !g.concurrency.TryAcquire() {
 		slog.Warn("Session create rejected: aggregate capacity exhausted",
@@ -60,7 +79,7 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 			"message": "Docpine sandbox host capacity is temporarily full. Please retry in a few moments.",
 			"code":    http.StatusServiceUnavailable,
 		}, http.StatusServiceUnavailable)
-		return false, nil
+		return false, deviceID, nil
 	}
 
 	slotReleased := false
@@ -82,7 +101,7 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 		if token == "" {
 			release()
 			g.sendChallengeResponse(w, "Cloudflare Turnstile verification required before creating a sandbox.")
-			return false, nil
+			return false, deviceID, nil
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -96,7 +115,7 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 				"error", err,
 			)
 			g.sendChallengeResponse(w, fmt.Sprintf("Cloudflare Turnstile verification failed: %v", err))
-			return false, nil
+			return false, deviceID, nil
 		}
 	}
 
@@ -119,7 +138,7 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 			"retry_after": retrySec,
 			"code":        http.StatusTooManyRequests,
 		}, http.StatusTooManyRequests)
-		return false, nil
+		return false, deviceID, nil
 	}
 
 	slog.Info("Anonymous session create passed abuse protection checks",
@@ -128,7 +147,35 @@ func (g *Guard) CheckAnonymousCreate(w http.ResponseWriter, r *http.Request, pay
 		"active_sandboxes", g.concurrency.Active(),
 	)
 
-	return true, release
+	return true, deviceID, release
+}
+
+// HasActiveDeviceSession checks if a device currently has an active bound sandbox session.
+func (g *Guard) HasActiveDeviceSession(deviceID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, exists := g.deviceSessions[deviceID]
+	return exists
+}
+
+// RegisterSession binds an active session ID to a device ID.
+func (g *Guard) RegisterSession(deviceID, sessionID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.deviceSessions[deviceID] = sessionID
+	g.sessionDevices[sessionID] = deviceID
+	slog.Info("Bound device to session", "device_id", deviceID, "session_id", sessionID)
+}
+
+// ReleaseSession unbinds an active session from its associated device.
+func (g *Guard) ReleaseSession(sessionID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if devID, exists := g.sessionDevices[sessionID]; exists {
+		delete(g.deviceSessions, devID)
+		delete(g.sessionDevices, sessionID)
+		slog.Info("Released device session binding", "device_id", devID, "session_id", sessionID)
+	}
 }
 
 // ConcurrencyLimiter returns the concurrency limiter.

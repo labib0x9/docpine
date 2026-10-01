@@ -95,4 +95,17 @@ func TestSessionHandler_Create(t *testing.T) {
 	if !ok || sessionID == "" {
 		t.Fatalf("expected session_id in response, got %v", createResp)
 	}
+
+	// Try to create another session with the same device cookie -> Should fail with 409 Conflict
+	reqDuplicate := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{}`))
+	reqDuplicate.Header.Set("CF-Connecting-IP", "203.0.113.88")
+	for _, c := range wCreate.Result().Cookies() {
+		reqDuplicate.AddCookie(c)
+	}
+	wDuplicate := httptest.NewRecorder()
+	mux.ServeHTTP(wDuplicate, reqDuplicate)
+
+	if wDuplicate.Code != http.StatusConflict {
+		t.Fatalf("expected HTTP 409 Conflict for duplicate device session, got %d (body: %s)", wDuplicate.Code, wDuplicate.Body.String())
+	}
 }
