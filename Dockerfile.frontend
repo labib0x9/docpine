@@ -1,0 +1,31 @@
+FROM node:22-alpine AS build
+RUN apk add --no-cache git
+WORKDIR /app
+
+ARG REPO=https://github.com/labib0x9/docpine-frontend
+ARG GIT_REF=main
+# change this value to force a fresh clone (git layer is otherwise cached)
+ARG CACHE_BUST=0
+RUN echo "$CACHE_BUST" && git clone --depth 1 --branch "$GIT_REF" "$REPO" .
+
+RUN npm ci
+
+# NEXT_PUBLIC_* are inlined at build time
+ARG NEXT_PUBLIC_API_BASE
+ARG NEXT_PUBLIC_WS_BASE
+ARG NEXT_PUBLIC_TURNSTILE_SITE_KEY
+ENV NEXT_PUBLIC_API_BASE=$NEXT_PUBLIC_API_BASE \
+    NEXT_PUBLIC_WS_BASE=$NEXT_PUBLIC_WS_BASE \
+    NEXT_PUBLIC_TURNSTILE_SITE_KEY=$NEXT_PUBLIC_TURNSTILE_SITE_KEY
+RUN npm run build && npm prune --omit=dev
+
+FROM node:22-alpine
+WORKDIR /app
+ENV NODE_ENV=production PORT=3000 HOSTNAME=0.0.0.0
+COPY --from=build /app/package.json ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/.next ./.next
+COPY --from=build /app/public ./public
+COPY --from=build /app/next.config.mjs ./
+EXPOSE 3000
+CMD ["npx", "next", "start"]

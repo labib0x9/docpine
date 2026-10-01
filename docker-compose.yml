@@ -1,0 +1,48 @@
+services:
+  docpine-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: docpine-backend
+    ports:
+      - "8080:8080"
+    environment:
+      ADDR: 0.0.0.0
+      PORT: 8080
+      RUNTIME_NAME: docker
+      IMAGE: alpine:3.20
+      NETWORK_MODE: none
+      SANDBOX_MEMORY: 134217728
+      SESSION_TTL: 5m
+      MAX_SESSIONS: 20
+      RATE_LIMIT_BURST: 5
+      RATE_LIMIT_REFILL: 30s
+      COOKIE_SECRET: ${COOKIE_SECRET}
+      TURNSTILE_SECRET: ${TURNSTILE_SECRET:-1x0000000000000000000000000000000AA}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      LOG_DIR: /app/logs
+      LOG_LEVEL: info
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - docpine-logs:/app/logs
+    restart: unless-stopped
+
+  docpine-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        GIT_REF: main
+        CACHE_BUST: 0
+        NEXT_PUBLIC_API_BASE: http://localhost:8080
+        NEXT_PUBLIC_WS_BASE: ws://localhost:8080
+        NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-1x00000000000000000000AA}
+    container_name: docpine-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - docpine-backend
+    restart: unless-stopped
+
+volumes:
+  docpine-logs:
