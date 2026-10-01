@@ -1,6 +1,6 @@
 # dockpine 🐳 
 
-A Go ephemeral container platform combining **pluggable sandbox runtimes** (Docker, gVisor, Firecracker), **layered abuse protection** for anonymous public sessions behind Cloudflare Tunnel, and interactive bidirectional terminal streaming over WebSockets.
+Go Ephemeral Container Platform with Docker Sandbox Runtime & WebSocket Terminal Streaming.
 
 ---
 
@@ -12,7 +12,6 @@ A Go ephemeral container platform combining **pluggable sandbox runtimes** (Dock
 - [Subsystem 2: Abuse Protection (Behind Cloudflare Tunnel)](#-subsystem-2-abuse-protection-behind-cloudflare-tunnel)
 - [API Reference](#-api-reference)
 - [Environment Configuration](#️-environment-configuration)
-- [Testing Matrix & CI](#-testing-matrix--ci)
 - [Getting Started](#-getting-started)
 
 ---
@@ -22,7 +21,7 @@ A Go ephemeral container platform combining **pluggable sandbox runtimes** (Dock
 Dockpine provisions isolated, ephemeral **Alpine Linux (`alpine:3.20`)** sandboxes on-demand and streams bidirectional interactive PTY terminal sessions over **WebSockets** with a 5-minute TTL.
 
 ### Core Pillars
-1. **Pluggable Sandbox Runtimes**: Switch seamlessly between **Docker containers**, **gVisor (`runsc`) sandboxes**, and **Firecracker microVMs** with zero changes to session/transport code.
+1. **Docker Sandbox Runtime**: **Docker containers** with zero changes to session/transport code.
 2. **Layered Abuse Protection**: Multi-tiered defense-in-depth against compute exhaustion on public anonymous endpoints behind **Cloudflare Tunnel (`cloudflared`)**.
 3. **Interactive PTY Streaming**: Low-latency binary and control frame multiplexing for browser terminal emulation (xterm.js).
 
@@ -36,7 +35,7 @@ Dockpine provisions isolated, ephemeral **Alpine Linux (`alpine:3.20`)** sandbox
                         ┌──────────────────┴──────────────────┐
                         │   Cloudflare Edge (Rate Limiting)   │
                         └──────────────────┬──────────────────┘
-                                           │ Cloudflare Tunnel (cloudflared)
+                                           │ Cloudflare Tunnel (cloudflared) / localhost (if not behind cloudflared)
                                            ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                 CONTROL PLANE (cmd/docpine)                                 │
@@ -61,10 +60,11 @@ Dockpine provisions isolated, ephemeral **Alpine Linux (`alpine:3.20`)** sandbox
 └───────────────────┼──────────────────────────┼──────────────────────────┼───────────────────┘
                     │                          │                          │
                     ▼                          ▼                          ▼
-          ┌───────────────────┐      ┌───────────────────┐      ┌───────────────────┐
-          │  Docker Sandbox   │      │  gVisor (runsc)   │      │Firecracker MicroVM│
-          │ (Alpine 3.20 PTY) │      │  (Sentry Sandbox) │      │(Guest Serial PTY) │
-          └───────────────────┘      └───────────────────┘      └───────────────────┘
+          ┌───────────────────┐      ┌───────────────────┐      ┌───────────────────--┐
+          │  Docker Sandbox   │      │  gVisor (runsc)   │      │ Firecracker MicroVM │
+          │ (Alpine 3.20 PTY) │      │ (Sentry Sandbox)  │      │  (Guest Serial PTY) │
+          │    (PROD READY)   │      │   (PLANNED)       │      │   (PLANNED)         │
+          └───────────────────┘      └───────────────────┘      └───────────────────--┘
 ```
 
 ---
@@ -89,11 +89,14 @@ type Sandbox interface {
 ```
 
 ### Backend Selection
+
 Select the active backend at startup using `RUNTIME_NAME` (or environment variable `DOCPINE_RUNTIME`):
+
 ```bash
 # Options: docker (default) | gvisor | firecracker
 export DOCPINE_RUNTIME=docker
 ```
+
 Dockpine verifies host requirements upon startup and **fails fast and loudly** if prerequisites are missing.
 
 ### Backend Comparison & Architectural Tradeoffs
@@ -122,6 +125,8 @@ To defend anonymous public creation endpoints (`POST /sessions`) against denial-
         ▼
 [ Layer 2: Signed Device Cookie ] ── (Server-issued HMAC-SHA256 __dp_dev)
         │
+        ├── Active Session Exists? ──► HTTP 409 Conflict (Single Session per Device)
+        │
         ▼
 [ Layer 3: Global Concurrency Cap ] ── (Hard Host Ceiling: Max N Sandboxes)
         │
@@ -136,12 +141,13 @@ To defend anonymous public creation endpoints (`POST /sessions`) against denial-
         ├── Throttled? ──► HTTP 429 Too Many Requests
         │
         ▼
-[ Sandbox Provisioned & 5-minute TTL Started ]
+[ Sandbox Provisioned & Bound to Device & 5-minute TTL Started ]
 ```
 
 ### Protection Layers
+
 1. **Real IP Extraction**: Since traffic arrives via `cloudflared` on localhost, real client IP is strictly parsed from `CF-Connecting-IP` (fallback `X-Forwarded-For`).
-2. **Signed Device Cookie (`__dp_dev`)**: Server-issued, HMAC-SHA256 signed browser cookie (`<uuid>.<timestamp>.<signature>`) preventing client tampering.
+2. **Signed Device Cookie (`__dp_dev`) & Single Session Enforcement**: Server-issued, HMAC-SHA256 signed browser cookie (`<uuid>.<timestamp>.<signature>`) preventing client tampering and enforcing a strict **1 active sandbox session per device** limit (HTTP 409 on duplicate attempts).
 3. **Combined Keying Token Bucket**: Rate limits on composite `(IP, DeviceCookie)` pairs with secondary per-IP limits.
 4. **Cloudflare Turnstile Gate**: Server-side token validation via Cloudflare `siteverify` API.
 5. **Hard Global Concurrency Cap**: Atomic semaphore enforcing a hard ceiling on concurrent active anonymous sandboxes (e.g. 20).
@@ -183,9 +189,10 @@ To defend anonymous public creation endpoints (`POST /sessions`) against denial-
 | `MAX_SESSIONS` | `20` | Global concurrency limit on active sandboxes |
 | `RATE_LIMIT_BURST` | `5` | Token bucket burst capacity |
 | `RATE_LIMIT_REFILL` | `30s` | Token refill duration |
-| `TURNSTILE_SECRET` | `""` | Cloudflare Turnstile secret key |
-| `COOKIE_SECRET` | `""` | Secret key for signing `__dp_dev` cookies |
-| `ALLOWED_ORIGINS` | `""` | Comma-separated list of allowed CORS / WS origins |
+| `TURNSTILE_SECRET` | `1x0000000000000000000000000000000AA` | Cloudflare Turnstile secret key |
+| `TURNSTILE_SITE_KEY` | `1x00000000000000000000AA` | Cloudflare Turnstile site key |
+| `COOKIE_SECRET` | `docpine-secret-key` | Secret key for signing `__dp_dev` cookies |
+| `ALLOWED_ORIGINS` | `http://locahost:3000` | Comma-separated list of allowed CORS / WS origins |
 | `RUNSC_PATH` | `runsc` | Path to `runsc` binary (gVisor) |
 | `FIRECRACKER_BIN` | `firecracker` | Path to `firecracker` binary |
 | `KERNEL_PATH` | `/var/lib/docpine/vmlinux` | Path to guest kernel (Firecracker) |
@@ -195,23 +202,24 @@ To defend anonymous public creation endpoints (`POST /sessions`) against denial-
 
 ## Getting Started
 
-### 1. Clone and Install
-```bash
-git clone https://github.com/labib0x9/docpine.git
-cd docpine
-go mod tidy
-```
-
-### 2. Configure Environment
+### 1. Configure Environment
 ```bash
 cp .env.example .env
 ```
 
-### 3. Start Control Plane (Port 8080)
+### 2. Start Services
 ```bash
-# Docker backend
-go run ./cmd/docpine
-
-# Or gVisor backend
-DOCPINE_RUNTIME=gvisor go run ./cmd/docpine
+docker compose up -d --build
 ```
+
+
+### (extra info): For single command build and deploy with cache bust:
+```bash
+docker compose build --build-arg CACHE_BUST=$(date +%s) docpine-frontend
+docker compose up -d
+```
+
+---
+# Notes
+
+This is a sub project of **CodeAtlas** and **Sockforces** projects. 
