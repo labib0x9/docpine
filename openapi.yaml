@@ -1,0 +1,606 @@
+openapi: 3.0.3
+info:
+  title: Docpine API
+  version: 1.0.0
+  description: |
+    Authenticated GitHub repository labs. Users sign in with GitHub, save a repository,
+    create lab runs, and stream execution output over Server-Sent Events.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: System
+  - name: Auth
+  - name: User
+  - name: Labs
+  - name: Runs
+paths:
+  /healthz:
+    get:
+      tags:
+        - System
+      operationId: healthz
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Service is running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /v1/auth/login:
+    get:
+      tags:
+        - Auth
+      operationId: login
+      summary: Start GitHub OAuth
+      description: Sets the `oauth_state` cookie and redirects to GitHub.
+      responses:
+        "302":
+          description: Redirect to GitHub authorization
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags:
+        - Auth
+      operationId: loginWithTurnstile
+      summary: Start GitHub OAuth with Turnstile verification
+      parameters:
+        - $ref: "#/components/parameters/TurnstileToken"
+      responses:
+        "302":
+          description: Redirect to GitHub authorization
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+        "400":
+          $ref: "#/components/responses/TurnstileFailed"
+        "428":
+          $ref: "#/components/responses/TurnstileRequired"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/auth/callback:
+    get:
+      tags:
+        - Auth
+      operationId: callback
+      summary: Complete GitHub OAuth
+      description: Exchanges `code` for a profile, creates the session, and redirects to the frontend.
+      parameters:
+        - name: code
+          in: query
+          required: false
+          description: OAuth authorization code
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          description: OAuth state value
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          description: Error reported by GitHub
+          schema:
+            type: string
+      responses:
+        "303":
+          description: Login succeeded
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags:
+        - Auth
+      operationId: callbackPost
+      summary: Complete GitHub OAuth using POST
+      description: Uses the same query parameters as the GET callback.
+      parameters:
+        - name: code
+          in: query
+          required: false
+          description: OAuth authorization code
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          description: OAuth state value
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          description: Error reported by GitHub
+          schema:
+            type: string
+      responses:
+        "303":
+          description: Login succeeded
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/auth/logout:
+    post:
+      tags:
+        - Auth
+      operationId: logout
+      summary: Delete the session and clear auth cookies
+      responses:
+        "204":
+          description: Logged out
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/me:
+    get:
+      tags:
+        - User
+      operationId: getCurrentUser
+      summary: Get the authenticated user
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/me/repo:
+    get:
+      tags:
+        - User
+      operationId: getUserRepo
+      summary: Get the saved GitHub repository
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Saved repository, or an empty string when none is set
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Repo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      tags:
+        - User
+      operationId: setUserRepo
+      summary: Save the user's GitHub repository
+      description: Accepts `owner/repo`, `github.com/owner/repo`, HTTPS URLs, and `git@github.com:owner/repo.git`.
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RepoRequest"
+      responses:
+        "200":
+          description: Normalized repository
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Repo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/labs:
+    get:
+      tags:
+        - Labs
+      operationId: listLabs
+      summary: List available labs
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Labs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Lab"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/labs/{id}/runs:
+    parameters:
+      - $ref: "#/components/parameters/LabId"
+    post:
+      tags:
+        - Runs
+      operationId: createRun
+      summary: Create and enqueue a lab run
+      description: The token may also be sent as `cf-turnstile-response` in the query string or form body when Turnstile is enabled.
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/TurnstileToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRunRequest"
+      responses:
+        "202":
+          description: Run queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabRun"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "428":
+          $ref: "#/components/responses/TurnstileRequired"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      tags:
+        - Runs
+      operationId: listRuns
+      summary: List the caller's runs for a lab
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LabRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/labs/{id}/runs/{runID}:
+    parameters:
+      - $ref: "#/components/parameters/LabId"
+      - $ref: "#/components/parameters/RunId"
+    get:
+      tags:
+        - Runs
+      operationId: getRun
+      summary: Get one run
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabRun"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/labs/{id}/runs/{runID}/result:
+    parameters:
+      - $ref: "#/components/parameters/LabId"
+      - $ref: "#/components/parameters/RunId"
+    get:
+      tags:
+        - Runs
+      operationId: getRunResult
+      summary: Get persisted run output
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Run result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/labs/{id}/runs/{runID}/events:
+    parameters:
+      - $ref: "#/components/parameters/LabId"
+      - $ref: "#/components/parameters/RunId"
+    get:
+      tags:
+        - Runs
+      operationId: streamRunEvents
+      summary: Stream run events with Server-Sent Events
+      description: |
+        Replays the API instance's hub history, then streams live events. The worker
+        publishes status, output, result, and error events to a RabbitMQ fanout
+        exchange; the API mirrors them into the local SSE hub. `ping` is generated by
+        the API every 25 seconds. The response stays open until the run finishes or
+        the client disconnects.
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: SSE event stream
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-cache
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: |
+                  event: status
+                  data: running
+
+                  event: output
+                  data: > test 1: echo hello
+
+                  event: result
+                  data: hello
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session
+      description: Signed session cookie issued by `/v1/auth/callback`.
+  parameters:
+    LabId:
+      name: id
+      in: path
+      required: true
+      description: Lab id
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    RunId:
+      name: runID
+      in: path
+      required: true
+      description: Run id
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    TurnstileToken:
+      name: CF-Turnstile-Response
+      in: header
+      required: false
+      description: Cloudflare Turnstile token; required only when `TURNSTILE_SECRET` is configured.
+      schema:
+        type: string
+  headers:
+    Location:
+      description: Redirect target
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or invalid session
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found or not owned by the caller
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TurnstileRequired:
+      description: Turnstile token is required
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TurnstileFailed:
+      description: Turnstile verification failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BadGateway:
+      description: GitHub OAuth or profile request failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Health:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          example: ok
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          example: unauthorized
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        github_id:
+          type: integer
+          format: int64
+        login:
+          type: string
+        avatar_url:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Repo:
+      type: object
+      properties:
+        github_repo:
+          type: string
+          example: https://github.com/octocat/Hello-World.git
+    RepoRequest:
+      type: object
+      required:
+        - github_repo
+      properties:
+        github_repo:
+          type: string
+          example: octocat/Hello-World
+    CreateRunRequest:
+      type: object
+      required:
+        - github_repo
+      properties:
+        github_repo:
+          type: string
+          example: octocat/Hello-World
+    Lab:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        tests:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    LabRun:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        user_id:
+          type: integer
+          format: int64
+        lab_id:
+          type: integer
+          format: int64
+        github_repo:
+          type: string
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - passed
+            - failed
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+    LabResult:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        run_id:
+          type: integer
+          format: int64
+        user_id:
+          type: integer
+          format: int64
+        github_repo:
+          type: string
+        lab_id:
+          type: integer
+          format: int64
+        results:
+          type: string
+        created_at:
+          type: string
+          format: date-time

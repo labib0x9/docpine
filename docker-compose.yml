@@ -1,48 +1,141 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: docpine-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: docpine
+    volumes:
+      - docpine-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d docpine"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    image: migrate/migrate:v4.17.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations
+    command:
+      - -path
+      - /migrations
+      - -database
+      - postgres://postgres:postgres@postgres:5432/docpine?sslmode=disable
+      - up
+    restart: "no"
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: docpine-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-docpine}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-docpine}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   docpine-backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
+      target: api
     container_name: docpine-backend
     ports:
       - "8080:8080"
     environment:
       ADDR: 0.0.0.0
       PORT: 8080
-      RUNTIME_NAME: docker
-      IMAGE: alpine:3.20
-      NETWORK_MODE: none
-      SANDBOX_MEMORY: 134217728
-      SESSION_TTL: 5m
-      MAX_SESSIONS: 20
-      RATE_LIMIT_BURST: 5
-      RATE_LIMIT_REFILL: 30s
-      COOKIE_SECRET: ${COOKIE_SECRET}
+      VERSION: ${VERSION:-1.0.0}
+      SERVICE_NAME: docpine
+      COOKIE_SECRET: ${COOKIE_SECRET:-docpine-dev-secret}
       TURNSTILE_SECRET: ${TURNSTILE_SECRET:-1x0000000000000000000000000000000AA}
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/docpine?sslmode=disable
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-docpine}:${RABBITMQ_PASSWORD:-docpine}@rabbitmq:5672/
+      RABBITMQ_QUEUE: ${RABBITMQ_QUEUE:-docpine.lab.runs}
+      RABBITMQ_EVENTS_EXCHANGE: ${RABBITMQ_EVENTS_EXCHANGE:-docpine.lab.events}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GITHUB_CALLBACK_URL: ${GITHUB_CALLBACK_URL:-http://localhost:8080/v1/auth/callback}
+      GITHUB_AUTHORIZE_URL: https://github.com/login/oauth/authorize
+      GITHUB_TOKEN_URL: https://github.com/login/oauth/access_token
+      GITHUB_USER_URL: https://api.github.com/user
+      GITHUB_FORCE_SECURE: ${GITHUB_FORCE_SECURE:-false}
       LOG_DIR: /app/logs
-      LOG_LEVEL: info
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - docpine-logs:/app/logs
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  docpine-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      target: worker
+    container_name: docpine-worker
+    environment:
+      VERSION: ${VERSION:-1.0.0}
+      SERVICE_NAME: docpine-worker
+      COOKIE_SECRET: ${COOKIE_SECRET:-docpine-dev-secret}
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/docpine?sslmode=disable
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-docpine}:${RABBITMQ_PASSWORD:-docpine}@rabbitmq:5672/
+      RABBITMQ_QUEUE: ${RABBITMQ_QUEUE:-docpine.lab.runs}
+      RABBITMQ_EVENTS_EXCHANGE: ${RABBITMQ_EVENTS_EXCHANGE:-docpine.lab.events}
+      LAB_RUNNER_IMAGE: ${LAB_RUNNER_IMAGE:-alpine:3.20}
+      LAB_RUN_TIMEOUT: ${LAB_RUN_TIMEOUT:-10m}
+      LAB_MEMORY: ${LAB_MEMORY:-268435456}
+      LAB_CPU_SHARES: ${LAB_CPU_SHARES:-0}
+      LOG_DIR: /app/logs
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - docpine-logs:/app/logs
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
     restart: unless-stopped
 
   docpine-frontend:
     build:
-      context: .
-      dockerfile: Dockerfile.frontend
+      context: ../docpine-console
+      dockerfile: Dockerfile
       args:
-        GIT_REF: main
-        CACHE_BUST: 0
-        NEXT_PUBLIC_API_BASE: http://localhost:8080
-        NEXT_PUBLIC_WS_BASE: ws://localhost:8080
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
+        NEXT_PUBLIC_SSE_BASE: ${NEXT_PUBLIC_SSE_BASE:-http://localhost:8080}
         NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-1x00000000000000000000AA}
     container_name: docpine-frontend
     ports:
       - "3000:3000"
     depends_on:
-      - docpine-backend
+      docpine-backend:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   docpine-logs:
+  docpine-db:

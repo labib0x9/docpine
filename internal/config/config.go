@@ -11,28 +11,8 @@ import (
 	"github.com/spf13/viper"
 )
 
-type Runtime struct {
-	Name           string
-	Image          string
-	NetworkMode    string
-	MemoryLimit    int64
-	CPUShares      int64
-	RunscPath      string
-	FirecrackerBin string
-	KernelPath     string
-	RootFSPath     string
-}
-
 type Abuse struct {
 	TurnstileSecret string
-	CookieSecret    []byte
-	RateBurst       int
-	RateRefillRate  time.Duration
-}
-
-type Session struct {
-	TTL           time.Duration
-	MaxConcurrent int
 }
 
 type Logger struct {
@@ -46,15 +26,45 @@ type Logger struct {
 	Level      string
 }
 
+type OAuthGithub struct {
+	ClientID           string
+	ClientSecret       string
+	CallbackURL        string
+	TokenURL           string
+	UserURL            string
+	SessionSecret      []byte
+	ForceSecure        bool
+	GithubAuthorizeURL string
+}
+
+type Database struct {
+	DSN string
+}
+
+type RabbitMQ struct {
+	URL            string
+	Queue          string
+	EventsExchange string
+}
+
+type Lab struct {
+	Image       string
+	Timeout     time.Duration
+	MemoryLimit int64
+	CPUShares   int64
+}
+
 type Config struct {
 	Version        string
 	Addr           string
 	Port           int
 	Service        string
-	Runtime        *Runtime
-	Session        *Session
 	Abuse          *Abuse
 	Logger         *Logger
+	Database       *Database
+	RabbitMQ       *RabbitMQ
+	Lab            *Lab
+	OAuthGithub    *OAuthGithub
 	AllowedOrigins []string
 }
 
@@ -82,19 +92,6 @@ func loadConfig() {
 	viper.SetDefault("SERVICE_NAME", "docpine")
 	viper.SetDefault("ADDR", "0.0.0.0")
 	viper.SetDefault("PORT", 8080)
-	viper.SetDefault("RUNTIME_NAME", "docker")
-	viper.SetDefault("IMAGE", "alpine:3.20")
-	viper.SetDefault("NETWORK_MODE", "none")
-	viper.SetDefault("SANDBOX_MEMORY", int64(128*1024*1024))
-	viper.SetDefault("CPU_SHARES", int64(0))
-	viper.SetDefault("RUNSC_PATH", "runsc")
-	viper.SetDefault("FIRECRACKER_BIN", "firecracker")
-	viper.SetDefault("KERNEL_PATH", "/var/lib/docpine/vmlinux")
-	viper.SetDefault("ROOTFS_PATH", "/var/lib/docpine/rootfs.ext4")
-	viper.SetDefault("SESSION_TTL", "5m")
-	viper.SetDefault("MAX_SESSIONS", 20)
-	viper.SetDefault("RATE_LIMIT_BURST", 5)
-	viper.SetDefault("RATE_LIMIT_REFILL", "30s")
 	viper.SetDefault("LOG_DIR", "")
 	viper.SetDefault("LOG_FILE", "")
 	viper.SetDefault("LOG_MAX_SIZE", 100)
@@ -103,6 +100,17 @@ func loadConfig() {
 	viper.SetDefault("LOG_COMPRESS", true)
 	viper.SetDefault("LOG_FORMAT", "text")
 	viper.SetDefault("LOG_LEVEL", "info")
+	viper.SetDefault("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/docpine?sslmode=disable")
+	viper.SetDefault("RABBITMQ_URL", "amqp://docpine:docpine@localhost:5672/")
+	viper.SetDefault("RABBITMQ_QUEUE", "docpine.lab.runs")
+	viper.SetDefault("RABBITMQ_EVENTS_EXCHANGE", "docpine.lab.events")
+	viper.SetDefault("LAB_RUNNER_IMAGE", "alpine:3.20")
+	viper.SetDefault("LAB_RUN_TIMEOUT", "10m")
+	viper.SetDefault("LAB_MEMORY", int64(256*1024*1024))
+	viper.SetDefault("LAB_CPU_SHARES", int64(0))
+	viper.SetDefault("GITHUB_AUTHORIZE_URL", "https://github.com/login/oauth/authorize")
+	viper.SetDefault("GITHUB_TOKEN_URL", "https://github.com/login/oauth/access_token")
+	viper.SetDefault("GITHUB_USER_URL", "https://api.github.com/user")
 
 	required := func(key string) string {
 		val := viper.GetString(key)
@@ -114,14 +122,13 @@ func loadConfig() {
 
 	cookieSecret := []byte(required("COOKIE_SECRET"))
 
-	sessionTTL := viper.GetDuration("SESSION_TTL")
-	rateRefill := viper.GetDuration("RATE_LIMIT_REFILL")
-
 	origins := viper.GetString("ALLOWED_ORIGINS")
 	allowedOrigins := make([]string, 0, 10)
 
 	for _, origin := range strings.Split(origins, ",") {
-		allowedOrigins = append(allowedOrigins, strings.TrimSpace(origin))
+		if trimmed := strings.TrimSpace(origin); trimmed != "" {
+			allowedOrigins = append(allowedOrigins, trimmed)
+		}
 	}
 
 	configuration = &Config{
@@ -129,26 +136,8 @@ func loadConfig() {
 		Addr:    viper.GetString("ADDR"),
 		Port:    viper.GetInt("PORT"),
 		Service: required("SERVICE_NAME"),
-		Runtime: &Runtime{
-			Name:           required("RUNTIME_NAME"),
-			Image:          required("IMAGE"),
-			NetworkMode:    viper.GetString("NETWORK_MODE"),
-			MemoryLimit:    viper.GetInt64("SANDBOX_MEMORY"),
-			CPUShares:      viper.GetInt64("CPU_SHARES"),
-			RunscPath:      viper.GetString("RUNSC_PATH"),
-			FirecrackerBin: viper.GetString("FIRECRACKER_BIN"),
-			KernelPath:     viper.GetString("KERNEL_PATH"),
-			RootFSPath:     viper.GetString("ROOTFS_PATH"),
-		},
-		Session: &Session{
-			TTL:           sessionTTL,
-			MaxConcurrent: viper.GetInt("MAX_SESSIONS"),
-		},
 		Abuse: &Abuse{
-			TurnstileSecret: required("TURNSTILE_SECRET"),
-			CookieSecret:    cookieSecret,
-			RateBurst:       viper.GetInt("RATE_LIMIT_BURST"),
-			RateRefillRate:  rateRefill,
+			TurnstileSecret: viper.GetString("TURNSTILE_SECRET"),
 		},
 		Logger: &Logger{
 			Directory:  viper.GetString("LOG_DIR"),
@@ -159,6 +148,30 @@ func loadConfig() {
 			Compress:   viper.GetBool("LOG_COMPRESS"),
 			Format:     viper.GetString("LOG_FORMAT"),
 			Level:      viper.GetString("LOG_LEVEL"),
+		},
+		Database: &Database{
+			DSN: viper.GetString("DATABASE_URL"),
+		},
+		RabbitMQ: &RabbitMQ{
+			URL:            viper.GetString("RABBITMQ_URL"),
+			Queue:          viper.GetString("RABBITMQ_QUEUE"),
+			EventsExchange: viper.GetString("RABBITMQ_EVENTS_EXCHANGE"),
+		},
+		Lab: &Lab{
+			Image:       viper.GetString("LAB_RUNNER_IMAGE"),
+			Timeout:     viper.GetDuration("LAB_RUN_TIMEOUT"),
+			MemoryLimit: viper.GetInt64("LAB_MEMORY"),
+			CPUShares:   viper.GetInt64("LAB_CPU_SHARES"),
+		},
+		OAuthGithub: &OAuthGithub{
+			ClientID:           viper.GetString("GITHUB_CLIENT_ID"),
+			ClientSecret:       viper.GetString("GITHUB_CLIENT_SECRET"),
+			CallbackURL:        viper.GetString("GITHUB_CALLBACK_URL"),
+			TokenURL:           viper.GetString("GITHUB_TOKEN_URL"),
+			UserURL:            viper.GetString("GITHUB_USER_URL"),
+			SessionSecret:      cookieSecret,
+			ForceSecure:        viper.GetBool("GITHUB_FORCE_SECURE"),
+			GithubAuthorizeURL: viper.GetString("GITHUB_AUTHORIZE_URL"),
 		},
 		AllowedOrigins: allowedOrigins,
 	}

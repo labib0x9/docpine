@@ -2,32 +2,58 @@ package abuse
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 )
+
+type verifyRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f verifyRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func turnstileResponse(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}
+}
 
 func TestTurnstileValidator(t *testing.T) {
 	ctx := context.Background()
 
-	// 1. Dev mode (empty secret) -> bypasses
-	devVal := NewTurnstileValidator("")
-	if err := devVal.Verify(ctx, "", "198.51.100.1"); err != nil {
-		t.Fatalf("expected bypass in dev mode, got: %v", err)
+	devValidator := NewTurnstileValidator("")
+	if devValidator.IsEnabled() {
+		t.Fatal("empty secret should disable validation")
+	}
+	if err := devValidator.Verify(ctx, "", "198.51.100.1"); err != nil {
+		t.Fatalf("dev bypass failed: %v", err)
 	}
 
-	// 2. Dummy test pass token (using Cloudflare standard test pass secret: 1x0000000000000000000000000000000AA)
-	passVal := NewTurnstileValidator("1x0000000000000000000000000000000AA")
-	if err := passVal.Verify(ctx, "1x0000000000000000000000000000000AA", "198.51.100.1"); err != nil {
-		t.Fatalf("expected test pass token to succeed, got: %v", err)
+	passValidator := NewTurnstileValidator("secret", &http.Client{Transport: verifyRoundTripper(func(request *http.Request) (*http.Response, error) {
+		if err := request.ParseForm(); err != nil {
+			return nil, err
+		}
+		if request.PostForm.Get("secret") != "secret" || request.PostForm.Get("response") != "pass" || request.PostForm.Get("remoteip") != "198.51.100.1" {
+			t.Fatalf("unexpected verification form: %v", request.PostForm)
+		}
+		return turnstileResponse(`{"success":true}`), nil
+	})})
+	if err := passValidator.Verify(ctx, "pass", "198.51.100.1"); err != nil {
+		t.Fatalf("valid token failed: %v", err)
+	}
+	if err := passValidator.Verify(ctx, "", "198.51.100.1"); !errors.Is(err, ErrTurnstileMissing) {
+		t.Fatalf("missing token error = %v; want ErrTurnstileMissing", err)
 	}
 
-	// 3. Dummy test fail token (using Cloudflare standard test fail secret: 2x0000000000000000000000000000000AA)
-	failVal := NewTurnstileValidator("2x0000000000000000000000000000000AA")
-	if err := failVal.Verify(ctx, "2x0000000000000000000000000000000AA", "198.51.100.1"); err == nil {
-		t.Fatal("expected test fail token to fail")
-	}
-
-	// 4. Missing token check
-	if err := passVal.Verify(ctx, "", "198.51.100.1"); err == nil {
-		t.Fatal("expected empty token to fail")
+	failValidator := NewTurnstileValidator("secret", &http.Client{Transport: verifyRoundTripper(func(request *http.Request) (*http.Response, error) {
+		return turnstileResponse(`{"success":false,"error-codes":["invalid-input-response"]}`), nil
+	})})
+	if err := failValidator.Verify(ctx, "bad", "198.51.100.1"); !errors.Is(err, ErrTurnstileFailed) {
+		t.Fatalf("failed token error = %v; want ErrTurnstileFailed", err)
 	}
 }

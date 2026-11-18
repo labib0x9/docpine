@@ -4,10 +4,20 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/docpine ./cmd/docpine
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
 
-FROM alpine:3.20
+FROM alpine:3.20 AS api
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=build /out/docpine /app/docpine
 EXPOSE 8080
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["/app/docpine"]
+
+FROM alpine:3.20 AS worker
+RUN apk add --no-cache ca-certificates git
+WORKDIR /app
+ENV DOCKER_HOST=unix:///var/run/docker.sock
+COPY --from=build /out/worker /app/worker
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/app/worker"]
