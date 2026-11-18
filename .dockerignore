@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+.markdown-collab/
+logs/
+*.log
+coverage.*
+*.out
+docs/
+deploy/
+*.md
+docker-compose.yml
+Dockerfile.backend
+Dockerfile.frontend
+cmd/test/

@@ -1,225 +1,153 @@
-# dockpine 🐳 
+# Docpine
 
-Go Ephemeral Container Platform with Docker Sandbox Runtime & WebSocket Terminal Streaming.
+Docpine runs repository-backed coding labs. A user signs in with GitHub, selects a repository, starts a lab, and watches build/test output stream over Server-Sent Events while a separate worker service clones the repository and executes the lab's commands in an isolated Docker container.
 
----
+## Architecture at a glance
 
-## Table of Contents
-
-- [Overview](#-overview)
-- [Architecture](#-architecture)
-- [Subsystem 1: Pluggable Sandbox Runtime Layer](#-subsystem-1-pluggable-sandbox-runtime-layer)
-- [Subsystem 2: Abuse Protection (Behind Cloudflare Tunnel)](#-subsystem-2-abuse-protection-behind-cloudflare-tunnel)
-- [API Reference](#-api-reference)
-- [Environment Configuration](#️-environment-configuration)
-- [Getting Started](#-getting-started)
-
----
-
-## Overview
-
-Dockpine provisions isolated, ephemeral **Alpine Linux (`alpine:3.20`)** sandboxes on-demand and streams bidirectional interactive PTY terminal sessions over **WebSockets** with a 5-minute TTL.
-
-### Core Pillars
-1. **Docker Sandbox Runtime**: **Docker containers** with zero changes to session/transport code.
-2. **Layered Abuse Protection**: Multi-tiered defense-in-depth against compute exhaustion on public anonymous endpoints behind **Cloudflare Tunnel (`cloudflared`)**.
-3. **Interactive PTY Streaming**: Low-latency binary and control frame multiplexing for browser terminal emulation (xterm.js).
-
----
-
-## Architecture
-
-```
-                                    Incoming Traffic
-                                           │
-                        ┌──────────────────┴──────────────────┐
-                        │   Cloudflare Edge (Rate Limiting)   │
-                        └──────────────────┬──────────────────┘
-                                           │ Cloudflare Tunnel (cloudflared) / localhost (if not behind cloudflared)
-                                           ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                 CONTROL PLANE (cmd/docpine)                                 │
-│                                                                                             │
-│   ┌─────────────────────────────────────────────────────────────────────────────────────┐   │
-│   │                              Abuse Protection Guard                                 │   │
-│   │  • Real IP Extraction (CF-Connecting-IP)       • Cloudflare Turnstile Gate          │   │
-│   │  • Signed Device Cookie (__dp_dev HMAC)        • Combined (IP, Cookie) Token Bucket │   │
-│   │  • Global Concurrency Cap (Backstop)                                                │   │
-│   └──────────────────────────────────┬──────────────────────────────────────────────────┘   │
-│                                      │ (Allowed)                                            │
-│                                      ▼                                                      │
-│   ┌─────────────────────────────────────────────────────────────────────────────────────┐   │
-│   │                 Session Manager (In-Memory Registry + 5-minute TTL Reaper)          │   │
-│   └──────────────────────────────────┬──────────────────────────────────────────────────┘   │
-│                                      │                                                      │
-│                                      ▼                                                      │
-│   ┌─────────────────────────────────────────────────────────────────────────────────────┐   │
-│   │                            internal/runtime (Interface)                             │   │
-│   │              DOCPINE_RUNTIME = docker | gvisor (runsc) | firecracker                │   │
-│   └───────────────┬──────────────────────────┬──────────────────────────┬───────────────┘   │
-└───────────────────┼──────────────────────────┼──────────────────────────┼───────────────────┘
-                    │                          │                          │
-                    ▼                          ▼                          ▼
-          ┌───────────────────┐      ┌───────────────────┐      ┌───────────────────--┐
-          │  Docker Sandbox   │      │  gVisor (runsc)   │      │ Firecracker MicroVM │
-          │ (Alpine 3.20 PTY) │      │ (Sentry Sandbox)  │      │  (Guest Serial PTY) │
-          │    (PROD READY)   │      │   (PLANNED)       │      │   (PLANNED)         │
-          └───────────────────┘      └───────────────────┘      └───────────────────--┘
+```mermaid
+flowchart LR
+    Browser -->|GitHub OAuth| API[Gin API]
+    Browser -->|SSE| API
+    API -->|users / sessions / labs| DB[(Postgres)]
+    API -->|run id| Jobs[(RabbitMQ jobs)]
+    Jobs --> Worker[worker service]
+    Worker -->|git clone| GitHub
+    Worker -->|one-shot container| Docker
+    Worker -->|status / output / result| Events[(RabbitMQ fanout)]
+    Events -->|event bridge| API
+    API --> Hub[SSE hub]
+    Worker -->|runs / results| DB
 ```
 
----
+The API never talks to Docker. Only the worker service mounts `/var/run/docker.sock` and spawns containers.
 
-## Subsystem 1: Pluggable Sandbox Runtime Layer
+## Run lifecycle
 
-Dockpine completely decouples session tracking and WebSocket multiplexing from the underlying container technology via the `runtime.Runtime` interface in `internal/runtime`:
+1. `POST /v1/auth/login` starts GitHub OAuth and sets an `oauth_state` cookie.
+2. `GET /v1/auth/callback` exchanges the code, creates the user/session, and sets a `session` cookie.
+3. `PUT /v1/me/repo` saves the normalized GitHub repository for the user.
+4. `POST /v1/labs/{id}/runs` creates a `lab_run` and publishes its id to the RabbitMQ jobs queue.
+5. The worker service consumes the job, clones the repository, copies it into a temporary container filesystem, and runs each configured lab command with `/bin/sh -c`.
+6. The worker persists the final `lab_result` and publishes status/output/result events to a RabbitMQ fanout exchange.
+7. The API consumes that exchange, feeds its in-memory SSE hub, and streams events to `GET /v1/labs/{id}/runs/{runID}/events`.
 
-```go
-type Runtime interface {
-    Name() string
-    CheckPrerequisites(ctx context.Context) error
-    CreateSandbox(ctx context.Context, opts SandboxOptions) (Sandbox, error)
-    Close() error
-}
+## Requirements
 
-type Sandbox interface {
-    ID() string
-    AttachPTY(ctx context.Context) (io.ReadWriteCloser, error)
-    Destroy(ctx context.Context) error
-}
-```
+- Go 1.26+
+- PostgreSQL 16
+- RabbitMQ 3
+- Docker Engine reachable by the worker service
+- A GitHub OAuth application
+- Optional Cloudflare Turnstile keys
 
-### Backend Selection
+## Quick start
 
-Select the active backend at startup using `RUNTIME_NAME` (or environment variable `DOCPINE_RUNTIME`):
-
-```bash
-# Options: docker (default) | gvisor | firecracker
-export DOCPINE_RUNTIME=docker
-```
-
-Dockpine verifies host requirements upon startup and **fails fast and loudly** if prerequisites are missing.
-
-### Backend Comparison & Architectural Tradeoffs
-
-| Backend | Driver | Host Prerequisites | Tradeoff & Architectural Decision |
-| :--- | :--- | :--- | :--- |
-| **Docker** | `docker` | Docker daemon reachable | Standard sibling-container execution using Docker API hijack streaming. Fast, ubiquitous, minimal configuration. |
-| **gVisor** | `gvisor` | `runsc` on `$PATH` + Docker daemon `runsc` runtime | **Tradeoff:** Docker `--runtime=runsc` vs direct OCI bundles.<br>**Decision:** Docpine drives `runsc` via Docker daemon configuration, gaining OCI image distribution and network isolation while gVisor's Sentry kernel intercepts syscalls in user space. |
-| **Firecracker** | `firecracker` | Linux `/dev/kvm`, `firecracker` binary, `vmlinux`, `rootfs.ext4` | **Tradeoff:** Guest serial console (`ttyS0`) over FIFOs vs in-guest vsock daemon (`AF_VSOCK`).<br>**Decision:** Docpine wires guest serial console `ttyS0` to named host FIFOs. Zero guest agent dependencies, instantaneous boot terminal access, and pure 1:1 hardware virtualization isolation per session. *(Requires Linux with KVM).* |
-
----
-
-## Subsystem 2: Abuse Protection (Behind Cloudflare Tunnel)
-
-To defend anonymous public creation endpoints (`POST /sessions`) against denial-of-service and transient compute pressure, Dockpine implements layered security:
-
-```
-[ Incoming Request ]
-        │
-        ▼
-[ Layer 0: Cloudflare Zone Rate Limiting Rule ] ── (Edge Coarse Filter)
-        │
-        ▼ (Cloudflare Tunnel: cloudflared)
-[ Layer 1: Real IP Extraction ] ── (Strictly CF-Connecting-IP, never RemoteAddr)
-        │
-        ▼
-[ Layer 2: Signed Device Cookie ] ── (Server-issued HMAC-SHA256 __dp_dev)
-        │
-        ├── Active Session Exists? ──► HTTP 409 Conflict (Single Session per Device)
-        │
-        ▼
-[ Layer 3: Global Concurrency Cap ] ── (Hard Host Ceiling: Max N Sandboxes)
-        │
-        ├── Full? ──► HTTP 429 / 503 (Capacity Reached)
-        │
-        ▼
-[ Layer 4: Cloudflare Turnstile Gate ] ── (Challenge Verification)
-        │
-        ▼
-[ Layer 5: Token Bucket Rate Limiter ] ── (Keyed on (IP, DeviceCookie) Pair)
-        │
-        ├── Throttled? ──► HTTP 429 Too Many Requests
-        │
-        ▼
-[ Sandbox Provisioned & Bound to Device & 5-minute TTL Started ]
-```
-
-### Protection Layers
-
-1. **Real IP Extraction**: Since traffic arrives via `cloudflared` on localhost, real client IP is strictly parsed from `CF-Connecting-IP` (fallback `X-Forwarded-For`).
-2. **Signed Device Cookie (`__dp_dev`) & Single Session Enforcement**: Server-issued, HMAC-SHA256 signed browser cookie (`<uuid>.<timestamp>.<signature>`) preventing client tampering and enforcing a strict **1 active sandbox session per device** limit (HTTP 409 on duplicate attempts).
-3. **Combined Keying Token Bucket**: Rate limits on composite `(IP, DeviceCookie)` pairs with secondary per-IP limits.
-4. **Cloudflare Turnstile Gate**: Server-side token validation via Cloudflare `siteverify` API.
-5. **Hard Global Concurrency Cap**: Atomic semaphore enforcing a hard ceiling on concurrent active anonymous sandboxes (e.g. 20).
-
----
-
-## API Reference
-
-### 1. Create Anonymous Sandbox Session
-- **Endpoint:** `POST /sessions`
-- **Headers (Optional):** `CF-Turnstile-Response: <token>`
-- **Request Body (Optional):**
-```json
-{
-  "turnstile_token": "0.example-turnstile-token"
-}
-```
-- **Responses:**
-  - `201 Created`: `{"session_id": "8a3e9c20-...", "expires_in_sec": 300}`
-  - `428 Precondition Required`: `{"error": "challenge_required", "pow_challenge": {...}}`
-  - `429 Too Many Requests`: `{"error": "rate_limited", "retry_after": 30}`
-  - `503 Service Unavailable`: `{"error": "global_capacity_reached"}`
-
-### 2. Attach Interactive WebSocket Terminal
-- **Endpoint:** `GET /sessions/{session_id}/attach`
-- **Protocol:** `ws://` / `wss://`
-- **Lane 1 (Terminal I/O):** Raw bidirectional bytes.
-- **Lane 2 (Control Frames):** JSON frames (e.g. `{"type": "resize", "cols": 120, "rows": 40}`, `{"type": "ping"}`).
-
----
-
-## Environment Configuration
-
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `RUNTIME_NAME` | `docker` | Runtime backend: `docker`, `gvisor`, `firecracker` |
-| `ADDR` / `PORT` | `0.0.0.0:8080` | HTTP/WS server listen address |
-| `SESSION_TTL` | `5m` | Ephemeral sandbox TTL |
-| `MAX_SESSIONS` | `20` | Global concurrency limit on active sandboxes |
-| `RATE_LIMIT_BURST` | `5` | Token bucket burst capacity |
-| `RATE_LIMIT_REFILL` | `30s` | Token refill duration |
-| `TURNSTILE_SECRET` | `1x0000000000000000000000000000000AA` | Cloudflare Turnstile secret key |
-| `TURNSTILE_SITE_KEY` | `1x00000000000000000000AA` | Cloudflare Turnstile site key |
-| `COOKIE_SECRET` | `docpine-secret-key` | Secret key for signing `__dp_dev` cookies |
-| `ALLOWED_ORIGINS` | `http://locahost:3000` | Comma-separated list of allowed CORS / WS origins |
-| `RUNSC_PATH` | `runsc` | Path to `runsc` binary (gVisor) |
-| `FIRECRACKER_BIN` | `firecracker` | Path to `firecracker` binary |
-| `KERNEL_PATH` | `/var/lib/docpine/vmlinux` | Path to guest kernel (Firecracker) |
-| `ROOTFS_PATH` | `/var/lib/docpine/rootfs.ext4` | Path to guest rootfs (Firecracker) |
-
----
-
-## Getting Started
-
-### 1. Configure Environment
 ```bash
 cp .env.example .env
 ```
 
-### 2. Start Services
+Set `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_CALLBACK_URL`, and a real `COOKIE_SECRET`. Then start the stack:
+
 ```bash
 docker compose up -d --build
 ```
 
+Migrations run automatically through the `migrate` service. The API is available on `http://localhost:8080`, the frontend on `http://localhost:3000`, and the worker runs as `worker`.
 
-### (extra info): For single command build and deploy with cache bust:
-```bash
-docker compose build --build-arg CACHE_BUST=$(date +%s) docpine-frontend
-docker compose up -d
+Seed at least one lab before creating runs:
+
+```sql
+INSERT INTO labs (name, tests)
+VALUES ('smoke', ARRAY['echo hello', 'test -f README.md']);
 ```
 
----
-# Notes
+## API overview
 
-This is a sub project of **CodeAtlas** and **Sockforces** projects. 
+Full request/response definitions are in [`openapi.yaml`](openapi.yaml).
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/healthz` | Liveness probe |
+| `GET`, `POST` | `/v1/auth/login` | Start GitHub OAuth |
+| `GET`, `POST` | `/v1/auth/callback` | Complete GitHub OAuth |
+| `POST` | `/v1/auth/logout` | Delete session and clear cookies |
+| `GET` | `/v1/me` | Current user |
+| `GET`, `PUT` | `/v1/me/repo` | Read or save the user's GitHub repository |
+| `GET` | `/v1/labs` | List available labs |
+| `POST`, `GET` | `/v1/labs/{id}/runs` | Create or list runs for a lab |
+| `GET` | `/v1/labs/{id}/runs/{runID}` | Read one run |
+| `GET` | `/v1/labs/{id}/runs/{runID}/result` | Read persisted output |
+| `GET` | `/v1/labs/{id}/runs/{runID}/events` | SSE stream for a run |
+
+All `/v1` endpoints except auth use the `session` cookie. `POST /v1/auth/login` and `POST /v1/labs/{id}/runs` also accept `CF-Turnstile-Response` when Turnstile is enabled.
+
+## Configuration
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `ADDR`, `PORT` | HTTP bind address | `0.0.0.0:8080` |
+| `COOKIE_SECRET` | Signs session tokens | required by API and worker config |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | OAuth app credentials | required for login |
+| `GITHUB_CALLBACK_URL` | OAuth redirect URL | `http://localhost:8080/v1/auth/callback` |
+| `GITHUB_FORCE_SECURE` | Emit `Secure` cookies | `false` |
+| `ALLOWED_ORIGINS` | Comma-separated CORS origins | empty |
+| `DATABASE_URL` | PostgreSQL DSN | local compose-style DSN |
+| `RABBITMQ_URL` | AMQP connection | local compose-style URL |
+| `RABBITMQ_QUEUE` | Job queue name | `docpine.lab.runs` |
+| `RABBITMQ_EVENTS_EXCHANGE` | Worker-to-API event fanout | `docpine.lab.events` |
+| `LAB_RUNNER_IMAGE` | Image used for lab commands | `alpine:3.20` |
+| `LAB_RUN_TIMEOUT` | Per-run deadline | `10m` |
+| `LAB_MEMORY` | Container memory limit in bytes | `268435456` |
+| `LAB_CPU_SHARES` | Container CPU shares | `0` |
+| `TURNSTILE_SECRET` | Cloudflare Turnstile secret | empty disables checks |
+| `LOG_DIR`, `LOG_LEVEL` | File logging and level | empty, `info` |
+
+`LAB_*` settings are used by the worker only. `RUNTIME_NAME`, `SESSION_TTL`, `RATE_LIMIT_*`, and Firecracker/gVisor settings from the previous sandbox design are no longer used.
+
+## Worker behavior
+
+- The worker is a separate binary (`cmd/worker`) and consumes jobs with prefetch 1.
+- Only the worker container mounts the host Docker socket; the API has no Docker client.
+- Repositories are normalized to `https://github.com/owner/repo.git`.
+- Files are copied into `/tmp/workspace` inside the container through the Docker API, so no host bind mount of a worker-local path is required.
+- Lab containers run with network mode `none`, a memory limit, CPU shares, and a timeout.
+- The runner image is pulled automatically if it is not already present on the Docker host.
+- Use an image that provides the toolchains your labs need; `alpine:3.20` only includes a POSIX shell and core tools.
+
+## SSE across services
+
+Worker events are published to the durable RabbitMQ fanout exchange `RABBITMQ_EVENTS_EXCHANGE`. Each API instance declares its own exclusive queue bound to that exchange and mirrors events into its local hub. Terminal `result` and `error` events close the stream.
+
+| Event | Data |
+| --- | --- |
+| `status` | `running`, `queued`, `passed`, or `failed` |
+| `output` | A chunk of combined command output |
+| `result` | Final output on success |
+| `error` | Final output on failure |
+| `ping` | 25-second keepalive from the API |
+
+The hub history is still per-process. Multiple API replicas receive all events, but a restarted replica loses history for runs that started before it came back. A durable event log is needed for complete replay.
+
+## Development
+
+```bash
+go build ./...
+go vet ./...
+go test ./...
+docker compose config -q
+```
+
+Use the dev container definition in `deploy/devcontainer/` for a Go toolchain plus Docker socket access when running the worker locally.
+
+## Operational notes
+
+- The API and worker scale independently; workers consume from the same durable job queue.
+- The Docker socket grants root-equivalent host access; isolate the worker accordingly.
+- Session rows are written at login, but request authentication validates the signed cookie and looks up the user. Deleting the row does not immediately invalidate an issued cookie.
+- RabbitMQ management ports and PostgreSQL credentials should be restricted outside local development.
+
+## More documentation
+
+- [Architecture](docs/architecture.md)
+- [Deployment](docs/deployment.md)
+- [OpenAPI specification](openapi.yaml)

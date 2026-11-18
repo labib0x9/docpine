@@ -1,93 +1,140 @@
+# Deployment
+
+## Local development
+
 ```bash
----
-## Deployment Notes & Production Recommendations
-
-### Cloudflare Tunnel Usage (Recommended)
-Dockpine is designed to run behind a Cloudflare Tunnel for security and routing:
-
-1. **Install `cloudflared` on the host:**
-   ```bash
-   curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-main.gpg
-   echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
-   sudo apt update
-   sudo apt install cloudflared
-   ```
-
-2. **Login to Cloudflare:**
-   ```bash
-   cloudflared tunnel login
-   ```
-
-3. **Create a tunnel configuration:**
-   ```bash
-   cloudflared tunnel create <tunnel-name>
-   ```
-
-4. **Configure the tunnel:**
-   Create `~/.cloudflared/config.yml` with:
-   ```yaml
-   tunnel: <tunnel-id>
-   credentials-file: /root/.cloudflared/<tunnel-id>.json
-   
-   ingress:
-     - hostname: [EMAIL_ADDRESS]
-       service: http://localhost:8080
-     - service: http_status:404
-   ```
-
-5. **Run the tunnel:**
-   ```bash
-   cloudflared tunnel run
-   ```
-
-6. **Add DNS record:**
-   In Cloudflare dashboard, create CNAME record pointing `[EMAIL_ADDRESS]` to `<tunnel-id>.cfargotunnel.com`.
-
-### Docker Compose with Cloudflare Tunnel
-You can run the tunnel as a separate container:
-```bash
-docker run -d \
-  --name cloudflared \
-  -v /root/.cloudflared/:/etc/cloudflared/ \
-  -e TUNNEL_TOKEN=<tunnel-id> \
-  cloudflare/cloudflared tunnel run
+cp .env.example .env
+docker compose up -d --build
 ```
 
-### Production Settings Recommendation
+The compose stack starts PostgreSQL, applies migrations, starts RabbitMQ with user `docpine`, then builds and starts the API, worker, and frontend. The frontend image is built from the local `../docpine-console` directory with its standalone Next.js Dockerfile. Only `docpine-worker` mounts the host Docker socket. The API health check polls `GET /healthz`.
+
+Seed labs before accepting runs:
+
+```sql
+INSERT INTO labs (name, tests)
+VALUES
+  ('smoke', ARRAY['echo hello', 'test -f README.md']),
+  ('go', ARRAY['go version']);
+```
+
+## GitHub OAuth
+
+Create a GitHub OAuth application whose callback URL exactly matches `GITHUB_CALLBACK_URL`, for example `https://labs.example.com/v1/auth/callback` in production or `http://localhost:8080/v1/auth/callback` locally.
+
+Set:
+
+```dotenv
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+GITHUB_CALLBACK_URL=https://labs.example.com/v1/auth/callback
+GITHUB_FORCE_SECURE=true
+ALLOWED_ORIGINS=https://labs.example.com
+```
+
+`GITHUB_FORCE_SECURE=true` is required when the API is served over HTTPS; otherwise browsers reject the `session` and `oauth_state` cookies.
+
+## Environment reference
+
+| Variable | Required | Used by | Notes |
+| --- | --- | --- | --- |
+| `COOKIE_SECRET` | yes | API, worker | Session token signing secret; use a long random value |
+| `GITHUB_CLIENT_ID` | for login | API | OAuth application client id |
+| `GITHUB_CLIENT_SECRET` | for login | API | OAuth application secret |
+| `GITHUB_CALLBACK_URL` | for login | API | Must match the GitHub application setting |
+| `GITHUB_FORCE_SECURE` | production | API | Set `true` behind HTTPS |
+| `ALLOWED_ORIGINS` | browser clients | API | Comma-separated origins; credentials are allowed |
+| `DATABASE_URL` | yes | API, worker | PostgreSQL DSN |
+| `RABBITMQ_URL` | yes | API, worker | AMQP URL; compose uses `docpine:docpine` |
+| `RABBITMQ_QUEUE` | no | API, worker | Job queue, default `docpine.lab.runs` |
+| `RABBITMQ_EVENTS_EXCHANGE` | no | API, worker | Fanout exchange, default `docpine.lab.events` |
+| `LAB_RUNNER_IMAGE` | no | worker | Default `alpine:3.20`; must provide required toolchains |
+| `LAB_RUN_TIMEOUT` | no | worker | Default `10m` |
+| `LAB_MEMORY` | no | worker | Bytes, default `268435456` |
+| `LAB_CPU_SHARES` | no | worker | Default `0` |
+| `TURNSTILE_SECRET` | no | API | Empty disables verification |
+| `TURNSTILE_SITE_KEY` | frontend only | frontend build | Inlined into the frontend build |
+| `NEXT_PUBLIC_API_BASE` | no | frontend build | API origin, default `http://localhost:8080` |
+| `NEXT_PUBLIC_SSE_BASE` | no | frontend build | SSE origin, default `NEXT_PUBLIC_API_BASE` |
+| `LOG_DIR`, `LOG_LEVEL` | no | API, worker | File logging and level |
+
+Legacy sandbox variables (`RUNTIME_NAME`, `IMAGE`, `NETWORK_MODE`, `SANDBOX_MEMORY`, `SESSION_TTL`, `MAX_SESSIONS`, `RATE_LIMIT_*`, Firecracker/gVisor paths) are ignored.
+
+## PostgreSQL and migrations
+
+Compose applies migrations with `migrate/migrate:v4.17.1` before the API and worker start. To run them manually:
+
 ```bash
-RUNTIME_NAME=gvisor                     # Security: user-space kernel
-SESSION_TTL=10m                         # Longer sessions for productivity
-MAX_SESSIONS=50                         # Higher concurrency for more users
-RATE_LIMIT_BURST=10
-RATE_LIMIT_REFILL=60s
-ALLOWED_ORIGINS=https://yourdomain.com
-LOG_LEVEL=info
-LOG_MAX_AGE=30
-LOG_MAX_BACKUPS=7
+migrate -path ./migrations -database "$DATABASE_URL" up
 ```
 
-### File Transfer Workflow (Windows Client)
-**Windows-only 1-liner to get files from Docker container:**
+Roll back with:
+
 ```bash
-powershell -NoProfile -Command "$sid = [System.Guid]::NewGuid().ToString(); docker cp dockpine-backend:web/download/$sid ./; Start-Sleep -Seconds 2; docker exec dockpine-backend rm -rf /web/download/$sid; Invoke-Item ./$sid"
+migrate -path ./migrations -database "$DATABASE_URL" down 1
 ```
-This creates a random session ID, copies the downloaded file to Windows, removes it from the container, and opens it automatically.
 
-### Build Arguments
+Back up the database before schema changes. `lab_result.results` stores full command output, so plan retention accordingly.
+
+## RabbitMQ
+
+Compose creates the `docpine` user through `RABBITMQ_DEFAULT_USER` and `RABBITMQ_DEFAULT_PASS`. Override `RABBITMQ_USER` and `RABBITMQ_PASSWORD` in `.env` for production. The job queue is durable and messages are persistent.
+
+The worker publishes run events to the durable fanout exchange `RABBITMQ_EVENTS_EXCHANGE`. Every API instance binds its own exclusive queue to that exchange and mirrors events into its local SSE hub. API and worker must use the same exchange name.
+
+The management UI is published on port `15672`. Restrict or remove that port outside development.
+
+## Docker runner
+
+Only the worker service connects to Docker through `/var/run/docker.sock`. This grants root-equivalent control of the host, so run the worker only on trusted hosts or isolate it with a dedicated daemon. The API container has no Docker socket mount and no Docker client.
+
+The worker copies cloned files into each container through the Docker API; no shared host path is needed. Images are pulled automatically when missing. If labs need compilers or interpreters, set `LAB_RUNNER_IMAGE` to a custom image that contains them.
+
+## Turnstile
+
+Set `TURNSTILE_SECRET` on the API and `TURNSTILE_SITE_KEY` for the frontend build. When the secret is empty, verification is skipped for local development.
+
+Clients send the token in the `CF-Turnstile-Response` header, the `cf-turnstile-response` query parameter, or a form field. Missing tokens return `428`; failed verification returns `400`.
+
+## Reverse proxy and TLS
+
+Terminate TLS at your proxy and forward `/v1` and `/healthz` to the API. SSE uses long-lived HTTP responses on `/v1/labs/{id}/runs/{runID}/events`, so disable aggressive response buffering for that path. Set `GITHUB_FORCE_SECURE=true` and proxy `CF-Connecting-IP` if you rely on Cloudflare for client IP information.
+
+Optional Cloudflare Tunnel setup:
+
 ```bash
-# Rebuild with fresh cache (updates Dockerfile, go.mod, or frontend files)
-docker compose build --build-arg CACHE_BUST=$(date +%s)
-
-# Rebuild only frontend with cache bust
-docker compose build --build-arg CACHE_BUST=$(date +%s) docpine-frontend
-
-# Build with specific Git ref
-docker compose build --build-arg GIT_REF=develop
+cloudflared tunnel login
+cloudflared tunnel create docpine
+cloudflared tunnel route dns docpine labs.example.com
+cloudflared tunnel run docpine
 ```
 
-### Troubleshooting
-- **Container starts but no shell:** Check Docker daemon health (`docker ps`), container logs (`docker logs docpine-backend`), and runtime prerequisites.
-- **Cloudflare authentication issues:** Ensure `cloudflared` is logged in (`cloudflared tunnel list`) and config file has correct permissions.
-- **WebSocket disconnects:** Verify WebSocket URL in frontend points to correct host/port and that Cloudflare tunnel is routing traffic correctly.
-- **Turnstile errors:** Check `cf-turnstile-response` header is sent from frontend and secret key is valid in `.env`.
-```
+Point the tunnel at `http://localhost:3000` for the frontend and route `/v1` and `/healthz` to `http://localhost:8080`.
+
+## Health checks
+
+- API: `GET /healthz` returns `{"status":"ok"}`.
+- PostgreSQL: compose uses `pg_isready`.
+- RabbitMQ: compose uses `rabbitmq-diagnostics ping`.
+- Worker: no HTTP endpoint; watch container logs and RabbitMQ queue depth.
+
+The frontend waits for the backend health check before starting.
+
+## Scaling
+
+The API and worker scale independently. Add worker replicas to consume jobs in parallel; each worker still mounts a Docker socket and uses prefetch 1. Add API replicas behind a load balancer; each replica receives all events from the RabbitMQ fanout exchange and serves SSE from its local hub.
+
+For complete SSE replay after API restarts, add a durable event log and hydrate hub history from it. Partition the job queue by run id only if strict per-run ordering matters more than throughput.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Login redirects but no session | `GITHUB_CALLBACK_URL`, `GITHUB_FORCE_SECURE`, and cookie domain |
+| `428 turnstile token is required` | Token header/query/form and `TURNSTILE_SECRET` |
+| Runs stay `queued` | RabbitMQ credentials, job queue name, and worker logs/container status |
+| Worker cannot create containers | Docker socket mount on worker, Docker daemon availability, `git` in worker image |
+| Clone failures | GitHub repo normalization and outbound HTTPS from the worker |
+| Test failures with missing tools | `LAB_RUNNER_IMAGE` contents |
+| SSE connects but no output | Event exchange name shared by API and worker; hub history belongs to the API replica serving the request |
+| CORS failures | `ALLOWED_ORIGINS` must contain the exact browser origin |

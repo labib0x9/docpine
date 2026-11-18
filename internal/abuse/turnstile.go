@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	ErrTurnstileFailed = errors.New("cloudflare turnstile verification failed")
+	ErrTurnstileFailed  = errors.New("cloudflare turnstile verification failed")
 	ErrTurnstileMissing = errors.New("turnstile token is required")
 )
 
@@ -57,7 +57,7 @@ func (v *TurnstileValidator) IsEnabled() bool {
 func (v *TurnstileValidator) Verify(ctx context.Context, token, clientIP string) error {
 	// If secret key is not set, allow in development mode with log
 	if !v.IsEnabled() {
-		slog.Debug("Turnstile validation skipped: DOCPINE_TURNSTILE_SECRET not configured")
+		slog.Debug("Turnstile validation skipped: TURNSTILE_SECRET not configured")
 		return nil
 	}
 
@@ -85,7 +85,11 @@ func (v *TurnstileValidator) Verify(ctx context.Context, token, clientIP string)
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("turnstile verification returned %s", resp.Status)
+	}
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return fmt.Errorf("failed to read turnstile response: %w", err)
 	}
